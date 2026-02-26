@@ -10,6 +10,7 @@ import 'package:lalo/call/webrtc/abr_controller.dart';
 import 'package:lalo/call/webrtc/media_manager.dart';
 import 'package:lalo/call/webrtc/peer_connection_manager.dart';
 import 'package:lalo/call/webrtc/quality_monitor.dart';
+import 'package:lalo/call/webrtc/simulcast_config.dart';
 import 'package:lalo/core/network/network_monitor.dart';
 import 'package:lalo/core/network/reconnection_manager.dart';
 import 'package:lalo/core/network/signaling_client.dart';
@@ -75,8 +76,7 @@ class CallService {
   Stream<StateSyncEvent> get onStateSync => _stateSyncController.stream;
 
   /// Whether video was disabled by ABR due to low bandwidth.
-  bool get isVideoDisabledByAbr =>
-      abrController?.isVideoDisabledByAbr ?? false;
+  bool get isVideoDisabledByAbr => abrController?.isVideoDisabledByAbr ?? false;
 
   /// Whether the call is currently reconnecting.
   bool get isReconnecting =>
@@ -146,9 +146,59 @@ class CallService {
     _startReconnectionMonitoring(peerConnectionManager);
   }
 
+  /// Publishes local media to the peer connection with simulcast encoding.
+  ///
+  /// Starts the local camera/mic stream via [MediaManager] then adds the
+  /// video track using the transceiver API with 3 simulcast layers
+  /// (high 720p, medium 360p, low 180p). Audio is added as a normal
+  /// send-only transceiver.
+  ///
+  /// Returns the local [MediaStream] for UI rendering.
+  Future<webrtc.MediaStream> publishLocalMedia(
+    PeerConnectionManager peerConnectionManager, {
+    bool video = true,
+    bool audio = true,
+    SimulcastConfig simulcastConfig = SimulcastConfig.defaultConfig,
+  }) async {
+    final stream = await _mediaManager.startLocalStream(
+      video: video,
+      audio: audio,
+    );
+
+    // Add video track with simulcast encodings (3 layers: h/m/l)
+    if (video) {
+      final videoTracks = stream.getVideoTracks();
+      if (videoTracks.isNotEmpty) {
+        await peerConnectionManager.addVideoTrackWithSimulcast(
+          videoTracks.first,
+          stream,
+          config: simulcastConfig,
+        );
+      }
+    }
+
+    // Add audio track via standard transceiver
+    if (audio) {
+      final audioTracks = stream.getAudioTracks();
+      if (audioTracks.isNotEmpty) {
+        final pc = await peerConnectionManager.createPeerConnection();
+        await pc.addTransceiver(
+          track: audioTracks.first,
+          kind: webrtc.RTCRtpMediaType.RTCRtpMediaTypeAudio,
+          init: webrtc.RTCRtpTransceiverInit(
+            direction: webrtc.TransceiverDirection.SendOnly,
+            streams: <webrtc.MediaStream>[stream],
+          ),
+        );
+      }
+    }
+
+    return stream;
+  }
+
   /// Starts the reconnection manager for network resilience.
   void _startReconnectionMonitoring(
-      PeerConnectionManager peerConnectionManager,
+    PeerConnectionManager peerConnectionManager,
   ) {
     final sigClient = _signalingClient;
     if (sigClient == null) return;
@@ -173,10 +223,13 @@ class CallService {
 
     // Forward ICE state events to the reconnection manager
     peerConnectionManager.onIceConnectionState.listen((state) {
-      if (state == webrtc.RTCIceConnectionState.RTCIceConnectionStateConnected ||
-          state == webrtc.RTCIceConnectionState.RTCIceConnectionStateCompleted) {
+      if (state ==
+              webrtc.RTCIceConnectionState.RTCIceConnectionStateConnected ||
+          state ==
+              webrtc.RTCIceConnectionState.RTCIceConnectionStateCompleted) {
         _reconnectionManager?.onIceConnected();
-      } else if (state == webrtc.RTCIceConnectionState.RTCIceConnectionStateFailed) {
+      } else if (state ==
+          webrtc.RTCIceConnectionState.RTCIceConnectionStateFailed) {
         _reconnectionManager?.onIceFailed();
       }
     });
@@ -414,4 +467,3 @@ class CallService {
     await _stateSyncController.close();
   }
 }
-
