@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:math' as math;
 
 import 'package:flutter/material.dart';
+import 'package:flutter_webrtc/flutter_webrtc.dart';
 
 import 'package:lalo/call/models/video_slot.dart';
 
@@ -44,6 +45,7 @@ class GroupCallScreen extends StatefulWidget {
     super.key,
     required this.roomId,
     required this.participants,
+    required this.renderers,
     this.assignment,
     this.onPinToggle,
     this.onLeave,
@@ -54,6 +56,9 @@ class GroupCallScreen extends StatefulWidget {
 
   /// Participant info keyed by participant ID.
   final Map<String, ParticipantInfo> participants;
+
+  /// Map of participant ID to their RTCVideoRenderer.
+  final Map<String, RTCVideoRenderer> renderers;
 
   /// Current video slot assignment (null = use simple grid fallback).
   final VideoSlotAssignment? assignment;
@@ -106,8 +111,7 @@ class _GroupCallScreenState extends State<GroupCallScreen> {
             Expanded(
               flex: 3,
               child: Padding(
-                padding:
-                    const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+                padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
                 child: _buildActiveGrid(),
               ),
             ),
@@ -127,8 +131,7 @@ class _GroupCallScreenState extends State<GroupCallScreen> {
               speakerOn: _speakerOn,
               onToggleMute: () => setState(() => _isMuted = !_isMuted),
               onToggleCamera: () => setState(() => _cameraOn = !_cameraOn),
-              onToggleSpeaker: () =>
-                  setState(() => _speakerOn = !_speakerOn),
+              onToggleSpeaker: () => setState(() => _speakerOn = !_speakerOn),
               onLeave: widget.onLeave ?? () => Navigator.of(context).maybePop(),
             ),
             const SizedBox(height: 12),
@@ -183,6 +186,7 @@ class _GroupCallScreenState extends State<GroupCallScreen> {
 
         return _SlotTile(
           participant: participant,
+          renderer: widget.renderers[slot.participantId],
           slot: slot,
           onTap: () => _handlePinToggle(slot),
         );
@@ -209,6 +213,7 @@ class _GroupCallScreenState extends State<GroupCallScreen> {
           width: 80,
           child: _ThumbnailTile(
             participant: participant,
+            renderer: widget.renderers[slot.participantId],
             isSpeaking: slot.isSpeaking,
             onTap: () => _handlePinToggle(slot),
           ),
@@ -234,6 +239,8 @@ class _GroupCallScreenState extends State<GroupCallScreen> {
         return _ParticipantTile(
           name: participants[index].displayName,
           audioMuted: participants[index].audioMuted,
+          videoMuted: participants[index].videoMuted,
+          renderer: widget.renderers[participants[index].id],
           isSpeaking: false,
           isPinned: false,
         );
@@ -270,16 +277,21 @@ class _GroupCallScreenState extends State<GroupCallScreen> {
 class _SlotTile extends StatelessWidget {
   const _SlotTile({
     required this.participant,
+    this.renderer,
     required this.slot,
     required this.onTap,
   });
 
   final ParticipantInfo participant;
+  final RTCVideoRenderer? renderer;
   final VideoSlot slot;
   final VoidCallback onTap;
 
   @override
   Widget build(BuildContext context) {
+    final showAvatar = participant.videoMuted ||
+        renderer == null ||
+        renderer!.srcObject == null;
     final qualityLabel = slot.quality == SlotQuality.hq
         ? 'HQ'
         : slot.quality == SlotQuality.mq
@@ -308,11 +320,25 @@ class _SlotTile extends StatelessWidget {
           child: Stack(
             fit: StackFit.expand,
             children: <Widget>[
-              // Background: avatar (video would go here when RTCVideoView
-              // is wired up with actual MediaStream)
-              _AvatarBackground(
-                name: participant.displayName,
-                videoMuted: participant.videoMuted,
+              // Smooth crossfade when participant changes in this slot.
+              AnimatedSwitcher(
+                duration: const Duration(milliseconds: 400),
+                child: showAvatar
+                    ? KeyedSubtree(
+                        key: ValueKey<String>('avatar_${participant.id}'),
+                        child: _AvatarBackground(
+                          name: participant.displayName,
+                          videoMuted: participant.videoMuted,
+                        ),
+                      )
+                    : KeyedSubtree(
+                        key: ValueKey<String>('video_${participant.id}'),
+                        child: RTCVideoView(
+                          renderer!,
+                          objectFit:
+                              RTCVideoViewObjectFit.RTCVideoViewObjectFitCover,
+                        ),
+                      ),
               ),
               // Bottom bar: name + mute icon + quality badge
               Positioned(
@@ -326,9 +352,9 @@ class _SlotTile extends StatelessWidget {
                       const Padding(
                         padding: EdgeInsets.only(right: 4),
                         child: Icon(
-                            Icons.push_pin,
-                            color: Colors.blueAccent,
-                            size: 14,
+                          Icons.push_pin,
+                          color: Colors.blueAccent,
+                          size: 14,
                         ),
                       ),
                     Expanded(
@@ -349,8 +375,7 @@ class _SlotTile extends StatelessWidget {
                     if (participant.audioMuted)
                       const Padding(
                         padding: EdgeInsets.only(left: 4),
-                        child:
-                            Icon(Icons.mic_off, color: Colors.red, size: 16),
+                        child: Icon(Icons.mic_off, color: Colors.red, size: 16),
                       ),
                     // Quality badge
                     Padding(
@@ -394,16 +419,21 @@ class _SlotTile extends StatelessWidget {
 class _ThumbnailTile extends StatelessWidget {
   const _ThumbnailTile({
     required this.participant,
+    this.renderer,
     required this.isSpeaking,
     required this.onTap,
   });
 
   final ParticipantInfo participant;
+  final RTCVideoRenderer? renderer;
   final bool isSpeaking;
   final VoidCallback onTap;
 
   @override
   Widget build(BuildContext context) {
+    final showAvatar = participant.videoMuted ||
+        renderer == null ||
+        renderer!.srcObject == null;
     return GestureDetector(
       onTap: onTap,
       child: AnimatedContainer(
@@ -420,11 +450,26 @@ class _ThumbnailTile extends StatelessWidget {
           child: Stack(
             fit: StackFit.expand,
             children: <Widget>[
-              _AvatarBackground(
-                name: participant.displayName,
-                videoMuted: participant.videoMuted,
-                fontSize: 14,
-                avatarRadius: 20,
+              AnimatedSwitcher(
+                duration: const Duration(milliseconds: 400),
+                child: showAvatar
+                    ? KeyedSubtree(
+                        key: ValueKey<String>('thumb_avatar_${participant.id}'),
+                        child: _AvatarBackground(
+                          name: participant.displayName,
+                          videoMuted: participant.videoMuted,
+                          fontSize: 14,
+                          avatarRadius: 20,
+                        ),
+                      )
+                    : KeyedSubtree(
+                        key: ValueKey<String>('thumb_video_${participant.id}'),
+                        child: RTCVideoView(
+                          renderer!,
+                          objectFit:
+                              RTCVideoViewObjectFit.RTCVideoViewObjectFitCover,
+                        ),
+                      ),
               ),
               Positioned(
                 left: 4,
@@ -486,8 +531,11 @@ class _AvatarBackground extends StatelessWidget {
         ),
       ),
       child: Center(
-          child: CircleAvatar(
-          radius: math.min(avatarRadius, 20 + name.length.toDouble(),),
+        child: CircleAvatar(
+          radius: math.min(
+            avatarRadius,
+            20 + name.length.toDouble(),
+          ),
           backgroundColor: Colors.white12,
           child: Text(
             initials,
@@ -523,17 +571,23 @@ class _ParticipantTile extends StatelessWidget {
   const _ParticipantTile({
     required this.name,
     required this.audioMuted,
+    required this.videoMuted,
     required this.isSpeaking,
     required this.isPinned,
+    this.renderer,
   });
 
   final String name;
   final bool audioMuted;
+  final bool videoMuted;
   final bool isSpeaking;
   final bool isPinned;
+  final RTCVideoRenderer? renderer;
 
   @override
   Widget build(BuildContext context) {
+    final showAvatar =
+        videoMuted || renderer == null || renderer!.srcObject == null;
     return AnimatedContainer(
       duration: const Duration(milliseconds: 300),
       decoration: BoxDecoration(
@@ -548,7 +602,25 @@ class _ParticipantTile extends StatelessWidget {
         child: Stack(
           fit: StackFit.expand,
           children: <Widget>[
-            _AvatarBackground(name: name, videoMuted: true),
+            AnimatedSwitcher(
+              duration: const Duration(milliseconds: 400),
+              child: showAvatar
+                  ? KeyedSubtree(
+                      key: ValueKey<String>('legacy_avatar_$name'),
+                      child: _AvatarBackground(
+                        name: name,
+                        videoMuted: videoMuted,
+                      ),
+                    )
+                  : KeyedSubtree(
+                      key: ValueKey<String>('legacy_video_$name'),
+                      child: RTCVideoView(
+                        renderer!,
+                        objectFit:
+                            RTCVideoViewObjectFit.RTCVideoViewObjectFitCover,
+                      ),
+                    ),
+            ),
             Positioned(
               left: 10,
               right: 10,
