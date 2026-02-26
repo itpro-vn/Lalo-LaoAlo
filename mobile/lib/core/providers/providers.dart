@@ -17,6 +17,7 @@ import 'package:lalo/call/webrtc/abr_controller.dart';
 import 'package:lalo/call/webrtc/media_manager.dart';
 import 'package:lalo/call/webrtc/peer_connection_manager.dart';
 import 'package:lalo/call/webrtc/quality_monitor.dart';
+import 'package:lalo/call/webrtc/slow_loop_controller.dart';
 import 'package:lalo/call/webrtc/two_loop_abr.dart';
 import 'package:lalo/core/auth/token_manager.dart';
 import 'package:lalo/core/config/app_config.dart';
@@ -248,15 +249,33 @@ final twoLoopAbrProvider = Provider<TwoLoopAbr>((ref) {
   final qualityMonitor = ref.watch(qualityMonitorProvider);
   final mediaManager = ref.watch(mediaManagerProvider);
   final deviceStateMonitor = ref.watch(deviceStateMonitorProvider);
+  final groupCallService = ref.watch(groupCallServiceProvider);
+
+  // Metrics reporter that forwards quality stats to backend via signaling.
+  final reporter = _SignalingMetricsReporter(groupCallService);
 
   final controller = TwoLoopAbr(
     peerConnectionManager: peerConnectionManager,
     qualityMonitor: qualityMonitor,
     mediaManager: mediaManager,
     deviceStateMonitor: deviceStateMonitor,
+    metricsReporter: reporter,
   );
 
+  // Wire policy updates from GroupCallService → TwoLoopAbr.
+  final policySub = groupCallService.onPolicyUpdate.listen((event) {
+    controller.setPolicyOverride(
+      PolicyOverride(
+        maxTier: _parseTier(event.maxTier),
+        forceAudioOnly: event.forceAudioOnly,
+        maxBitrateKbps: event.maxBitrateKbps,
+        forceCodec: _parseCodec(event.forceCodec),
+      ),
+    );
+  });
+
   ref.onDispose(() {
+    unawaited(policySub.cancel());
     unawaited(controller.dispose());
   });
   return controller;
@@ -368,3 +387,45 @@ final pushServiceProvider = Provider<PushService>((ref) {
   });
   return service;
 });
+
+// ---------------------------------------------------------------------------
+// Policy / Metrics helpers
+// ---------------------------------------------------------------------------
+
+/// Metrics reporter that sends quality samples to the backend via
+/// [GroupCallService.sendQualityMetrics].
+class _SignalingMetricsReporter implements MetricsReporter {
+  _SignalingMetricsReporter(this._groupCallService);
+  final GroupCallService _groupCallService;
+
+  @override
+  void reportQualityMetrics(Map<String, dynamic> sample) {
+    final roomId = _groupCallService.activeRoomId;
+    if (roomId == null) return;
+    _groupCallService.sendQualityMetrics(roomId, [sample]);
+  }
+}
+
+QualityTier? _parseTier(String? tier) {
+  switch (tier) {
+    case 'good':
+      return QualityTier.good;
+    case 'fair':
+      return QualityTier.fair;
+    case 'poor':
+      return QualityTier.poor;
+    default:
+      return null;
+  }
+}
+
+VideoCodec? _parseCodec(String? codec) {
+  switch (codec) {
+    case 'vp8':
+      return VideoCodec.vp8;
+    case 'h264':
+      return VideoCodec.h264;
+    default:
+      return null;
+  }
+}

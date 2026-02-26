@@ -291,7 +291,7 @@ class SlowLoopController {
     } else {
       // Auto codec selection: prefer H.264 on good, VP8 on poor
       final desiredCodec = effectiveTier == QualityTier.poor
-          ? VideoCodec.vp8  // VP8 is more resilient at low bitrates
+          ? VideoCodec.vp8 // VP8 is more resilient at low bitrates
           : VideoCodec.h264; // H.264 is more efficient at higher bitrates
 
       if (desiredCodec != _currentCodec) {
@@ -355,8 +355,16 @@ class SlowLoopController {
   }
 
   Future<void> _applyAudioParams(AudioAbrParams params) async {
+    // Apply bitrate via sender parameters.
     await _peerConnectionManager.setAudioEncodingParameters(
       maxBitrateKbps: params.bitrateKbps,
+    );
+    // Apply FEC, ptime via SDP renegotiation.
+    await _peerConnectionManager.applyAudioOpusConfig(
+      AudioOpusConfig(
+        fecEnabled: params.fecEnabled,
+        packetTimeMs: params.packetTimeMs,
+      ),
     );
   }
 

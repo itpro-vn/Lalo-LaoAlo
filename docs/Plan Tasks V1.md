@@ -539,63 +539,63 @@
 
 ---
 
-### PA-09: iOS Client — WebRTC Core
+### PA-09: Flutter Client — WebRTC Core
 
-| Field        | Value          |
-| ------------ | -------------- |
-| **Priority** | P0             |
-| **Estimate** | XL (2-4 weeks) |
-| **Deps**     | PA-05          |
-| **Owner**    | iOS Lead       |
-| **Type**     | Mobile Client  |
+| Field        | Value         |
+| ------------ | ------------- |
+| **Priority** | P0            |
+| **Estimate** | L (1-2 weeks) |
+| **Deps**     | PA-05         |
+| **Owner**    | Mobile Lead   |
+| **Type**     | Mobile Client |
 
-**Mô tả**: Implement iOS WebRTC stack: libwebrtc integration, signaling client, media capture/render.
+**Mô tả**: Implement Flutter WebRTC stack: flutter_webrtc integration, signaling client, media capture/render.
 
 **Yêu cầu chi tiết**:
 
-1. **libwebrtc Integration** (M120+ branch):
-   - Build libwebrtc cho iOS (arm64 + simulator)
-   - Hoặc dùng prebuilt binary (WebRTC.xcframework từ Google hoặc LiveKit's WebRTC build)
-   - Swift wrapper cho core WebRTC APIs
+1. **flutter_webrtc Integration** (^0.12.0):
+   - Plugin wraps libwebrtc cho cả iOS + Android
+   - Dart API cho PeerConnection, MediaStream, MediaDevices
+   - Không cần build libwebrtc riêng — plugin handles
 
-2. **Signaling Client**:
+2. **Signaling Client** (web_socket_channel ^3.0.0):
    - WebSocket client connect tới signaling server (WSS)
    - JWT authentication on connect
-   - Auto-reconnect với exponential backoff
+   - Auto-reconnect với exponential backoff (ReconnectionManager)
    - Handle tất cả signaling messages (Spec PA-05 protocol)
    - Heartbeat/ping-pong implementation
 
 3. **PeerConnection Management**:
    - Create `RTCPeerConnection` với ICE servers (STUN + TURN)
-   - SDP offer/answer generation
+   - SDP offer/answer generation via flutter_webrtc API
    - ICE candidate handling (trickle ICE)
    - ICE connection state monitoring
    - ICE restart support (cho network handover)
    - ICE timeout: 15 seconds → TURN fallback
 
 4. **Media Capture**:
-   - Camera capture: front/back switch, 720p max, 30fps
+   - Camera capture: `navigator.mediaDevices.getUserMedia()` — front/back switch, 720p max, 30fps
    - Microphone capture: Opus codec
-   - Permission handling: camera + microphone
-   - Audio session configuration: `.voiceChat` category
+   - Permission handling via permission_handler plugin
+   - Audio session configuration handled by flutter_webrtc
    - Echo cancellation, noise suppression (WebRTC built-in)
 
 5. **Media Rendering**:
-   - Local preview: `RTCMTLVideoView` hoặc `RTCEAGLVideoView`
-   - Remote video: render incoming track
-   - Audio routing: speaker / earpiece / bluetooth
+   - Local preview: `RTCVideoView` widget
+   - Remote video: `RTCVideoView` for incoming tracks
+   - Audio routing: speaker / earpiece / bluetooth (via flutter_webrtc helper)
    - Video mirror cho front camera
 
-6. **Call Manager**:
-   - High-level API: `startCall(userId:, type:)`, `acceptCall(callId:)`, `endCall(callId:)`
+6. **Call Manager** (Riverpod StateNotifier):
+   - High-level API: `startCall(userId, type)`, `acceptCall(callId)`, `endCall(callId)`
    - Manage call state locally (mirror server state)
    - Media controls: mute/unmute audio, enable/disable video, switch camera
-   - Call statistics collection (RTT, packet loss, bitrate, jitter)
+   - Call statistics collection (RTT, packet loss, bitrate, jitter) via `getStats()`
 
 **Acceptance Criteria**:
 
-- [ ] 1:1 voice call iOS ↔ iOS hoạt động end-to-end
-- [ ] 1:1 video call iOS ↔ iOS hoạt động end-to-end
+- [ ] 1:1 voice call hoạt động end-to-end (Flutter ↔ Flutter)
+- [ ] 1:1 video call hoạt động end-to-end
 - [ ] P2P connection established (verify via ICE candidate types)
 - [ ] TURN fallback hoạt động khi P2P fail
 - [ ] Audio routing: speaker/earpiece switch
@@ -603,200 +603,97 @@
 - [ ] Mute/unmute audio + video
 - [ ] Call stats collection hoạt động
 - [ ] Network change (WiFi ↔ 4G): ICE restart, < 2s interruption
+- [ ] Works on both iOS and Android from single codebase
 
 ---
 
-### PA-10: iOS Client — CallKit Integration
+### PA-10: Flutter Client — Native Call Integration (callkeep)
 
 | Field        | Value         |
 | ------------ | ------------- |
 | **Priority** | P0            |
 | **Estimate** | L (1-2 weeks) |
 | **Deps**     | PA-09         |
-| **Owner**    | iOS Lead      |
+| **Owner**    | Mobile Lead   |
 | **Type**     | Mobile Client |
 
-**Mô tả**: Integrate CallKit cho native incoming/outgoing call UI, VoIP push notification.
+**Mô tả**: Integrate callkeep plugin cho native CallKit (iOS) / ConnectionService (Android) incoming/outgoing call UI.
 
 **Yêu cầu chi tiết**:
 
-1. **CallKit Provider**:
-   - `CXProvider` configuration: supported handle types, max calls per group, video support
-   - Report incoming call: `reportNewIncomingCall(with:update:)`
-   - Report outgoing call: `reportOutgoingCall(with:startedConnectingAt:connectedAt:)`
-   - Report call ended: `reportCall(with:endedAt:reason:)`
-   - Handle system events: call on hold, audio interrupted
+1. **callkeep Plugin Setup** (^0.4.1):
+   - Configure `FlutterCallkeep` with supported handle types, video support
+   - iOS: CallKit CXProvider auto-configured by callkeep
+   - Android: ConnectionService + PhoneAccount auto-registered by callkeep
 
-2. **CXCallController**:
-   - Start call action: `CXStartCallAction`
-   - Answer call action: `CXAnswerCallAction`
-   - End call action: `CXEndCallAction`
-   - Set mute action: `CXSetMutedCallAction`
-   - Set held action: `CXSetHeldCallAction`
+2. **Incoming Call Handling**:
+   - callkeep displays native incoming call UI on both platforms
+   - Listen to callkeep events: `answerCall`, `endCall`, `didPerformDTMFAction`, `didToggleHoldAction`, `didPerformSetMutedCallAction`
+   - Wire callkeep events → CallService → Signaling
 
-3. **VoIP Push Notification**:
-   - `PushKit` framework: register for VoIP pushes
-   - `PKPushRegistry` delegate: handle incoming VoIP push
-   - **CRITICAL**: Phải report CallKit incoming call ngay trong `didReceiveIncomingPush` callback
-   - Push payload → extract call info → report to CallKit → connect signaling
+3. **Outgoing Call Handling**:
+   - Report outgoing call via callkeep: `startCall(uuid, handle, callerName)`
+   - Report call connected: `reportConnectingOfUUID`, `reportConnectedOfUUID`
+   - Report call ended: `reportEndCallWithUUID`
 
-4. **Background Handling**:
-   - Audio continues khi app in background (CallKit manages audio session)
-   - App wakes up from killed state via VoIP push
-   - Handle `beginBackgroundTask` cho signaling reconnect
+4. **iOS-Specific (handled natively by callkeep)**:
+   - VoIP push via PushKit → `reportNewIncomingCall` called immediately in native code
+   - Audio session managed by CallKit
+   - Background audio continues automatically
 
-5. **UI Integration**:
-   - Native call UI (system phone screen) cho incoming calls
-   - In-app call UI cho active calls (custom)
-   - Call log integration (optional, via CallKit)
+5. **Android-Specific (handled natively by callkeep)**:
+   - FCM data message → ForegroundService (TYPE_PHONE_CALL)
+   - Full-screen intent notification for locked screen
+   - ConnectionService with CAPABILITY_SELF_MANAGED
+   - Ongoing notification with caller info
+
+6. **Background Handling**:
+   - iOS: Audio continues via CallKit (managed by callkeep native code)
+   - Android: Audio continues via ForegroundService
+   - Both handled transparently — Flutter code is platform-agnostic
 
 **Acceptance Criteria**:
 
-- [ ] Incoming call: VoIP push → native call UI → accept → audio connected
-- [ ] Incoming call khi app killed → VoIP push wakes app → call UI
+- [ ] Incoming call: push → native call UI → accept → audio connected (iOS + Android)
+- [ ] Incoming call khi app killed → push wakes app → native call UI
 - [ ] Outgoing call: in-app initiate → native call UI → connected
-- [ ] Call shows in system call log
+- [ ] Call shows in system call log (iOS)
 - [ ] Background → foreground: audio continues seamlessly
-- [ ] Mute via CallKit (from native UI) hoạt động
+- [ ] Mute via native UI hoạt động (both platforms)
 - [ ] Multiple calls: reject second call when busy
 - [ ] Audio routing via system UI (speaker/bluetooth)
+- [ ] Works on iOS 15+ and Android API 26+
 
 ---
 
-### PA-11: Android Client — WebRTC Core
+### ~~PA-11: (Consolidated into PA-09)~~
 
-| Field        | Value          |
-| ------------ | -------------- |
-| **Priority** | P0             |
-| **Estimate** | XL (2-4 weeks) |
-| **Deps**     | PA-05          |
-| **Owner**    | Android Lead   |
-| **Type**     | Mobile Client  |
-
-**Mô tả**: Implement Android WebRTC stack: libwebrtc integration, signaling client, media capture/render.
-
-**Yêu cầu chi tiết**:
-
-1. **libwebrtc Integration** (M120+ branch):
-   - Gradle dependency: prebuilt Google WebRTC AAR hoặc LiveKit's WebRTC build
-   - Kotlin wrapper cho core WebRTC APIs
-   - ProGuard rules cho WebRTC classes
-
-2. **Signaling Client**:
-   - OkHttp WebSocket client connect tới signaling server (WSS)
-   - JWT authentication on connect
-   - Auto-reconnect với exponential backoff
-   - Handle tất cả signaling messages
-   - Heartbeat/ping-pong implementation
-
-3. **PeerConnection Management**:
-   - Tương tự iOS (PA-09, item 3)
-   - `PeerConnectionFactory` initialization
-   - Hardware encoder/decoder detection (MediaCodec)
-
-4. **Media Capture**:
-   - Camera capture: `Camera2Capturer` (API 26+), front/back switch
-   - Microphone capture: Opus codec
-   - Runtime permission handling: `CAMERA`, `RECORD_AUDIO`
-   - Audio mode: `MODE_IN_COMMUNICATION`
-   - Echo cancellation, noise suppression (WebRTC built-in)
-
-5. **Media Rendering**:
-   - Local preview: `SurfaceViewRenderer` hoặc `TextureViewRenderer`
-   - Remote video: render incoming track
-   - Audio routing: speaker / earpiece / bluetooth / wired headset
-   - Video mirror cho front camera
-
-6. **Call Manager**:
-   - Tương tự iOS (PA-09, item 6)
-   - Foreground Service: `TYPE_PHONE_CALL` (Android 12+)
-   - Notification channel cho ongoing call
-
-**Acceptance Criteria**:
-
-- [ ] 1:1 voice call Android ↔ Android hoạt động end-to-end
-- [ ] 1:1 video call Android ↔ Android hoạt động end-to-end
-- [ ] Cross-platform: iOS ↔ Android call hoạt động
-- [ ] P2P + TURN fallback hoạt động
-- [ ] Audio routing: speaker/earpiece/bluetooth
-- [ ] Camera switch front/back
-- [ ] Mute/unmute audio + video
-- [ ] Call stats collection
-- [ ] Network change handling: ICE restart
+> Task PA-11 (Android WebRTC Core) đã được gộp vào PA-09 (Flutter Client — WebRTC Core). Flutter sử dụng flutter_webrtc plugin, cung cấp unified API cho cả iOS và Android từ single codebase.
 
 ---
 
-### PA-12: Android Client — ConnectionService Integration
+### ~~PA-12: (Consolidated into PA-10)~~
 
-| Field        | Value         |
-| ------------ | ------------- |
-| **Priority** | P0            |
-| **Estimate** | L (1-2 weeks) |
-| **Deps**     | PA-11         |
-| **Owner**    | Android Lead  |
-| **Type**     | Mobile Client |
-
-**Mô tả**: Integrate Android `ConnectionService` cho call management, FCM high-priority push.
-
-**Yêu cầu chi tiết**:
-
-1. **ConnectionService**:
-   - Extend `ConnectionService`, register `PhoneAccount`
-   - `onCreateIncomingConnection()`: handle incoming call
-   - `onCreateOutgoingConnection()`: handle outgoing call
-   - Connection states: `STATE_INITIALIZING → STATE_RINGING → STATE_ACTIVE → STATE_DISCONNECTED`
-   - Support: `CAPABILITY_MUTE`, `CAPABILITY_SUPPORT_HOLD`
-
-2. **FCM Push Notification**:
-   - High-priority FCM message cho incoming calls
-   - FCM data message (not notification): app handles display
-   - Payload: `{call_id, caller_name, caller_avatar, call_type}`
-   - Handle khi app in background/killed: start foreground service → show incoming call UI
-
-3. **Foreground Service**:
-   - `TYPE_PHONE_CALL` foreground service (Android 12+)
-   - Ongoing notification: caller info, duration, controls (mute/end)
-   - `MANAGE_OWN_CALLS` permission
-
-4. **Incoming Call UI**:
-   - Full-screen notification (khi app locked/background)
-   - Heads-up notification (khi app in foreground of other apps)
-   - In-app UI (khi app in foreground)
-   - Accept/Reject buttons
-
-5. **Background Handling**:
-   - Audio continues via foreground service
-   - Wake lock management
-   - Battery optimization exemption request
-
-**Acceptance Criteria**:
-
-- [ ] Incoming call via FCM → full-screen notification → accept → connected
-- [ ] Incoming call khi app killed → FCM wakes → show call UI
-- [ ] Outgoing call → ConnectionService → connected
-- [ ] Foreground service với ongoing notification
-- [ ] Mute/end from notification
-- [ ] Audio continues in background
-- [ ] Works on Android 8+ (API 26+)
+> Task PA-12 (Android ConnectionService Integration) đã được gộp vào PA-10 (Flutter Client — Native Call Integration). Flutter sử dụng callkeep plugin, wrapping CallKit (iOS) và ConnectionService (Android) trong unified Dart API.
 
 ---
 
 ### PA-13: Basic Quality Metrics Collection
 
-| Field        | Value               |
-| ------------ | ------------------- |
-| **Priority** | P2                  |
-| **Estimate** | M (3-5 days)        |
-| **Deps**     | PA-09, PA-11, PA-06 |
-| **Owner**    | Mobile + Backend    |
-| **Type**     | Observability       |
+| Field        | Value            |
+| ------------ | ---------------- |
+| **Priority** | P2               |
+| **Estimate** | M (3-5 days)     |
+| **Deps**     | PA-09, PA-06     |
+| **Owner**    | Mobile + Backend |
+| **Type**     | Observability    |
 
 **Mô tả**: Thu thập QoS metrics từ client SDK, gửi về backend, store vào ClickHouse.
 
 **Yêu cầu chi tiết**:
 
-1. **Client-side Collection** (iOS + Android):
-   - Thu thập từ `RTCPeerConnection.getStats()` mỗi 5 giây:
+1. **Client-side Collection** (Flutter — iOS + Android):
+   - Thu thập từ flutter_webrtc `RTCPeerConnection.getStats()` mỗi 5 giây:
      - RTT (ms)
      - Packet loss (%)
      - Jitter (ms)
@@ -829,13 +726,13 @@
 
 ### PA-14: Basic ABR — Fast Loop Only
 
-| Field        | Value               |
-| ------------ | ------------------- |
-| **Priority** | P2                  |
-| **Estimate** | L (1-2 weeks)       |
-| **Deps**     | PA-09, PA-11, PA-13 |
-| **Owner**    | Mobile              |
-| **Type**     | Quality             |
+| Field        | Value         |
+| ------------ | ------------- |
+| **Priority** | P2            |
+| **Estimate** | L (1-2 weeks) |
+| **Deps**     | PA-09, PA-13  |
+| **Owner**    | Mobile        |
+| **Type**     | Quality       |
 
 **Mô tả**: Implement fast loop ABR trên client (bitrate adjustment, framerate/resolution reduction).
 
@@ -858,7 +755,7 @@
    - Auto-recover: bandwidth > 200 kbps stable 10s → re-enable video
 
 3. **Video Encoder Control**:
-   - Điều chỉnh `maxBitrate`, `maxFramerate` trên `RTCRtpSender` parameters
+   - Điều chỉnh `maxBitrate`, `maxFramerate` trên flutter_webrtc `RTCRtpSender` parameters
    - Resolution downscale via `scaleResolutionDownBy`
    - Không đổi codec trong Phase A (slow loop deferred to Phase B)
 
@@ -923,13 +820,13 @@
 
 ### PA-16: End-to-End Integration Testing (Phase A)
 
-| Field        | Value                                    |
-| ------------ | ---------------------------------------- |
-| **Priority** | P1                                       |
-| **Estimate** | L (1-2 weeks)                            |
-| **Deps**     | PA-05 through PA-14, PA-17, PA-18, PA-19 |
-| **Owner**    | QA + All teams                           |
-| **Type**     | Testing                                  |
+| Field        | Value                                           |
+| ------------ | ----------------------------------------------- |
+| **Priority** | P1                                              |
+| **Estimate** | L (1-2 weeks)                                   |
+| **Deps**     | PA-05 through PA-10, PA-13, PA-14, PA-17, PA-18 |
+| **Owner**    | QA + All teams                                  |
+| **Type**     | Testing                                         |
 
 **Mô tả**: E2E testing cho toàn bộ 1:1 call flow, đảm bảo exit criteria Phase A.
 
@@ -938,7 +835,7 @@
 1. **Happy Path Tests**:
    - 1:1 voice call: initiate → ring → accept → talk → end
    - 1:1 video call: initiate → ring → accept → video flowing → end
-   - Cross-platform: iOS ↔ Android call
+   - Cross-device: Flutter app on iOS ↔ Android
    - P2P path verification
    - TURN fallback verification
 
@@ -1083,36 +980,41 @@
 
 ---
 
-### PA-18: iOS — PushKit VoIP Integration & Call State Machine
+### PA-18: Flutter — Push Integration & Call State Machine
 
-| Field        | Value        |
-| ------------ | ------------ |
-| **Priority** | P0           |
-| **Estimate** | M (3-5 days) |
-| **Deps**     | PA-10, PA-17 |
-| **Owner**    | iOS          |
-| **Type**     | Feature      |
+| Field        | Value         |
+| ------------ | ------------- |
+| **Priority** | P0            |
+| **Estimate** | L (1-2 weeks) |
+| **Deps**     | PA-10, PA-17  |
+| **Owner**    | Mobile        |
+| **Type**     | Feature       |
 
-**Mô tả**: Integrate PushKit VoIP push với CallKit, đảm bảo incoming call hoạt động khi app killed/background. Implement client-side call state machine (Spec §6.6.3, §6.6.5).
+**Mô tả**: Integrate firebase_messaging + callkeep cho incoming call handling khi app killed/background. Implement client-side call state machine (Spec §6.6.3, §6.6.5). Covers both iOS (PushKit VoIP) and Android (FCM data message) via unified Flutter layer.
 
 **Yêu cầu chi tiết**:
 
-1. **PushKit Registration**:
-   - `PKPushRegistry` với type `.voIP`
-   - Gửi VoIP token tới Push Gateway (`POST /v1/push/register`)
-   - Handle token refresh trong `pushRegistry(_:didUpdatePushCredentials:)`
+1. **Push Token Registration** (firebase_messaging ^15.0.0):
+   - Get FCM token via `FirebaseMessaging.instance.getToken()`
+   - iOS: Get VoIP token via callkeep's native PushKit registration
+   - Gửi tokens tới Push Gateway (`POST /v1/push/register`)
+   - Handle token refresh: `FirebaseMessaging.instance.onTokenRefresh`
+   - Handle VoIP token refresh via callkeep callback
 
-2. **PushKit → CallKit Bridge** (CRITICAL TIMING):
-   - Trong `pushRegistry(_:didReceiveIncomingPushWith:)`:
-     - Parse push payload
-     - **GỌI NGAY** `provider.reportNewIncomingCall()` — TRƯỚC bất kỳ async work nào
-     - Nếu không gọi → iOS **kill app** và **revoke PushKit token**
-   - Sau khi report:
-     - Start WebSocket connection (background)
+2. **Push → Native Call UI Bridge**:
+   - **iOS flow** (handled in native code by callkeep):
+     - PushKit VoIP push arrives → callkeep native code calls `reportNewIncomingCall()` IMMEDIATELY
+     - **CRITICAL**: Đây là constraint của iOS — callkeep xử lý đúng trong native layer
+     - Flutter Dart layer nhận event `displayIncomingCall` từ callkeep
+   - **Android flow** (handled in native code):
+     - FCM data message arrives → `FirebaseMessagingService.onMessageReceived()` (native)
+     - Start ForegroundService (TYPE_PHONE_CALL) → callkeep displays incoming call
+     - Flutter Dart layer nhận event `displayIncomingCall` từ callkeep
+   - Sau khi nhận event:
+     - Start WebSocket connection (if not connected)
      - Begin SDP exchange
-   - Dùng placeholder data nếu chưa có đầy đủ caller info, update via `CXCallUpdate` sau
 
-3. **Client-Side Call State Machine**:
+3. **Client-Side Call State Machine** (Riverpod StateNotifier):
 
    ```
    IDLE → INCOMING (push received) → CONNECTING (user accept)
@@ -1122,99 +1024,36 @@
 
    - States: `IDLE`, `INCOMING`, `CALLING`, `CONNECTING`, `ACTIVE`, `ENDED`
    - Timeout: INCOMING → ENDED after 45s, CONNECTING → ENDED after 15s (ICE timeout)
-   - Thread-safe state transitions (actor hoặc serial queue)
+   - Thread-safe: Riverpod ensures state updates on main isolate
 
 4. **Race Condition Handling**:
    - Push + WSS `incoming_call` cùng lúc → dedup bằng `call_id`
    - Push arrives sau khi caller cancel → check call validity via WSS
-   - Multiple devices: nhận `call_accepted` từ device khác → dismiss CallKit UI
+   - Multiple devices: nhận `call_accepted` từ device khác → dismiss native call UI via callkeep
 
 5. **Background Audio**:
-   - `AVAudioSession` category `.playAndRecord` với mode `.voiceChat`
-   - Background mode: `voip`, `audio`
-   - Audio continues khi app vào background
+   - iOS: Managed by CallKit (via callkeep native code) — background modes: voip, audio
+   - Android: Managed by ForegroundService — wakelock_plus for keeping audio active
+   - Both transparent to Flutter Dart layer
 
 **Acceptance Criteria**:
 
-- [ ] App killed → VoIP push → CallKit UI shown trong < 3s
-- [ ] App background → VoIP push → CallKit UI shown
-- [ ] `reportNewIncomingCall` gọi ngay trong didReceiveIncomingPush (verified via logs)
+- [ ] iOS: App killed → VoIP push → CallKit UI shown trong < 3s
+- [ ] Android: App killed → FCM data message → full-screen UI shown trong < 4s
+- [ ] App background → push → native call UI shown (both platforms)
+- [ ] `reportNewIncomingCall` called immediately on iOS (verified via logs)
 - [ ] State machine transitions đúng cho tất cả flows
 - [ ] Dedup: push + WSS cùng call → chỉ show 1 UI
 - [ ] Multi-device dismiss khi device khác accept
-- [ ] Token refresh gửi tới Push Gateway thành công
-- [ ] Audio continues khi user switch app during call
+- [ ] Token refresh gửi tới Push Gateway thành công (FCM + VoIP)
+- [ ] Audio continues khi user switch app during call (both platforms)
+- [ ] Works on iOS 15+ and Android 10+ (API 29+)
 
 ---
 
-### PA-19: Android — FCM + Full-Screen Intent & Call State Machine
+### ~~PA-19: (Consolidated into PA-18)~~
 
-| Field        | Value        |
-| ------------ | ------------ |
-| **Priority** | P0           |
-| **Estimate** | M (3-5 days) |
-| **Deps**     | PA-12, PA-17 |
-| **Owner**    | Android      |
-| **Type**     | Feature      |
-
-**Mô tả**: Integrate FCM data message với ConnectionService + Full-Screen Intent, đảm bảo incoming call hoạt động khi app killed/background trên Android 10-15. Implement client-side call state machine (Spec §6.6.4, §6.6.5).
-
-**Yêu cầu chi tiết**:
-
-1. **FCM Data Message Handler**:
-   - Extend `FirebaseMessagingService`
-   - `onMessageReceived()`: parse data payload, start foreground service
-   - `onNewToken()`: gửi token mới tới Push Gateway
-   - **KHÔNG dùng notification message** — chỉ data message để đảm bảo `onMessageReceived()` luôn được gọi
-
-2. **Foreground Service**:
-   - `ServiceInfo.FOREGROUND_SERVICE_TYPE_PHONE_CALL` (Android 12+)
-   - `ServiceInfo.FOREGROUND_SERVICE_TYPE_DEFAULT` (Android < 12)
-   - Ongoing notification với caller info
-   - Wake lock management cho audio processing
-
-3. **Full-Screen Intent**:
-   - `USE_FULL_SCREEN_INTENT` permission (Android 10+)
-   - `fullScreenIntent` trên notification → `IncomingCallActivity`
-   - Hoạt động khi:
-     - Device locked (keyguard)
-     - App background/killed
-     - Device idle (Doze mode — FCM high-priority bypass)
-   - `IncomingCallActivity`: show caller info + Accept/Decline buttons
-   - `turnScreenOn`, `showWhenLocked`, `dismissKeyguard` flags
-
-4. **ConnectionService Integration**:
-   - `addNewIncomingCall()` sau khi start foreground service
-   - Connection states: `STATE_INITIALIZING → STATE_RINGING → STATE_ACTIVE → STATE_DISCONNECTED`
-   - `PhoneAccount` registration with `CAPABILITY_SELF_MANAGED`
-   - Handle `onAnswer()`, `onReject()`, `onDisconnect()`
-
-5. **Client-Side Call State Machine** (same as iOS):
-   - States: `IDLE`, `INCOMING`, `CALLING`, `CONNECTING`, `ACTIVE`, `ENDED`
-   - Thread-safe: Kotlin coroutine + StateFlow
-   - Dedup push + WSS events by `call_id`
-
-6. **Android Permissions**:
-   ```xml
-   <uses-permission android:name="android.permission.USE_FULL_SCREEN_INTENT" />
-   <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
-   <uses-permission android:name="android.permission.FOREGROUND_SERVICE_PHONE_CALL" />
-   <uses-permission android:name="android.permission.MANAGE_OWN_CALLS" />
-   <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
-   ```
-
-**Acceptance Criteria**:
-
-- [ ] App killed → FCM data message → full-screen UI shown trong < 4s
-- [ ] App background → FCM → full-screen notification
-- [ ] Device locked → full-screen intent shows over keyguard
-- [ ] Foreground service running khi có active call
-- [ ] ConnectionService states transition đúng
-- [ ] Doze mode: FCM high-priority bypasses Doze
-- [ ] State machine dedup push + WSS events
-- [ ] Multi-device dismiss khi device khác accept
-- [ ] Android 10, 12, 13, 14: tested trên mỗi version
-- [ ] POST_NOTIFICATIONS permission request (Android 13+)
+> Task PA-19 (Android FCM + Full-Screen Intent & Call State Machine) đã được gộp vào PA-18 (Flutter — Push Integration & Call State Machine). Flutter sử dụng firebase_messaging + callkeep plugins, xử lý cả iOS VoIP push và Android FCM data message trong unified codebase.
 
 ---
 
@@ -1298,12 +1137,12 @@
 
 **Yêu cầu chi tiết**:
 
-1. **Client Simulcast Publishing** (iOS + Android):
+1. **Client Simulcast Publishing** (Flutter):
    - Publish 3 simulcast layers:
      - High: 720p/30fps (~1.5 Mbps)
      - Medium: 360p/20fps (~500 kbps)
      - Low: 180p/10fps (~150 kbps)
-   - Configure via `RTCRtpEncodingParameters`:
+   - Configure via flutter_webrtc `RTCRtpEncodingParameters`:
      ```
      rid: "h", maxBitrate: 1500000, scaleResolutionDownBy: 1
      rid: "m", maxBitrate: 500000, scaleResolutionDownBy: 2
@@ -1357,7 +1196,7 @@
    - Speaker detection threshold: -40 dB
    - Speaker hold: giữ slot 3 seconds sau khi ngừng nói (tránh flicker)
 
-3. **UI Implementation** (iOS + Android):
+3. **UI Implementation** (Flutter):
    - Grid layout: 2×2 cho 4 active slots
    - Bottom strip: thumbnails cho remaining participants
    - Smooth animation khi slot assignment thay đổi
@@ -1430,8 +1269,9 @@
    - Configuration: rules loadable từ config (hot-reload)
 
 5. **Battery & Thermal Awareness**:
-   - iOS: `ProcessInfo.thermalState`, `UIDevice.batteryLevel`
-   - Android: `BatteryManager`, thermal API
+   - Flutter: `battery_plus` plugin for battery level
+   - iOS thermal: method channel to native `ProcessInfo.thermalState`
+   - Android thermal: method channel to native thermal API
    - Low battery (< 20%): reduce video quality 1 tier
    - Thermal throttle: reduce video quality, limit framerate
 
@@ -1454,7 +1294,7 @@
 | ------------ | ------------- |
 | **Priority** | P0            |
 | **Estimate** | L (1-2 weeks) |
-| **Deps**     | PA-09, PA-11  |
+| **Deps**     | PA-09         |
 | **Owner**    | Mobile        |
 | **Type**     | Reliability   |
 
@@ -1463,8 +1303,8 @@
 **Yêu cầu chi tiết**:
 
 1. **Network Change Detection**:
-   - iOS: `NWPathMonitor` detect network interface change
-   - Android: `ConnectivityManager.NetworkCallback` detect network change
+   - Flutter: `connectivity_plus` plugin detect network type change
+   - Additional: flutter_webrtc detects ICE connection state changes natively
    - Detect: WiFi → Cellular, Cellular → WiFi, Cellular → Cellular (handover)
 
 2. **ICE Restart Flow** (Spec §6.5):
@@ -1936,8 +1776,9 @@
 
 1. **Device Capability Detection**:
    - Check hardware encoder/decoder support cho VP9, AV1
-   - iOS: check `VTIsHardwareDecodeSupported()` per codec
-   - Android: check `MediaCodecInfo` capabilities
+   - Flutter: method channel to native APIs for codec capability check
+   - iOS: `VTIsHardwareDecodeSupported()` via method channel
+   - Android: `MediaCodecInfo` capabilities via method channel
    - Report capability to server during registration
 
 2. **Codec Negotiation**:
@@ -2001,7 +1842,7 @@
 
 **Yêu cầu chi tiết**:
 
-1. **Integration**: RNNoise library compile cho iOS (C → Swift bridge) và Android (JNI)
+1. **Integration**: RNNoise library via Flutter FFI (dart:ffi) hoặc method channel to native (iOS: C bridge, Android: JNI)
 2. **Audio Pipeline**: insert noise suppression trước Opus encoder
 3. **Toggle**: user setting on/off, default on
 4. **Performance**: CPU overhead < 5% trên mid-range devices
@@ -2029,10 +1870,11 @@
 
 **Yêu cầu chi tiết**:
 
-1. **iOS**: `RPScreenRecorder` → `RTCVideoSource` (Broadcast Extension cho background sharing)
-2. **Android**: MediaProjection API → `RTCVideoSource`
-3. **Content-Type Optimization**: detect screen content → adjust encoder (higher resolution, lower framerate cho text, higher framerate cho video)
-4. **SFU**: dedicated screen share track, auto-promote to HQ slot
+1. **Flutter**: flutter_webrtc screen capture API
+   - iOS: `RPScreenRecorder` → `RTCVideoSource` (Broadcast Extension cho background sharing, requires native setup)
+   - Android: MediaProjection API → `RTCVideoSource` (handled by flutter_webrtc)
+2. **Content-Type Optimization**: detect screen content → adjust encoder (higher resolution, lower framerate cho text, higher framerate cho video)
+3. **SFU**: dedicated screen share track, auto-promote to HQ slot
 
 **Acceptance Criteria**:
 
@@ -2080,20 +1922,23 @@ Phase A (MVP):
   PA-01 → PA-02, PA-03, PA-04
   PA-04 → PA-07, PA-08
   PA-01 + PA-02 + PA-03 + PA-04 → PA-05, PA-06
-  PA-05 → PA-09, PA-11
+  PA-05 → PA-09
   PA-09 → PA-10
-  PA-11 → PA-12
-  PA-09 + PA-11 + PA-06 → PA-13
+  PA-09 + PA-06 → PA-13
   PA-13 → PA-14
   PA-05 + PA-06 → PA-15
+  PA-02 + PA-04 + PA-05 → PA-17
+  PA-10 + PA-17 → PA-18
   All PA → PA-16
+
+  (PA-11, PA-12, PA-19 consolidated into PA-09, PA-10, PA-18)
 
 Phase B (Group & Quality):
   PA-06 + PA-08 → PB-01
   PB-01 → PB-02
   PB-01 + PB-02 → PB-03
   PA-14 + PB-02 → PB-04
-  PA-09 + PA-11 → PB-05
+  PA-09 → PB-05
   PA-05 + PB-01 → PB-06
   All PB → PB-07
 
@@ -2125,14 +1970,15 @@ Phase D (Advanced):
 
 ## Risk Register
 
-| Risk                                      | Impact | Likelihood | Mitigation                                      |
-| ----------------------------------------- | ------ | ---------- | ----------------------------------------------- |
-| libwebrtc build complexity                | High   | Medium     | Use prebuilt binaries (LiveKit's WebRTC build)  |
-| P2P success rate too low → high TURN cost | Medium | Medium     | ICE optimization, monitor early, adjust pricing |
-| CallKit/ConnectionService API changes     | Medium | Low        | Abstract call management layer, version check   |
-| LiveKit performance at scale              | High   | Low        | Load test early (Phase A), have fallback plan   |
-| Cross-region latency unacceptable         | Medium | Medium     | Choose nearby regions, CDN for signaling        |
-| ClickHouse operational complexity         | Low    | Medium     | Start with managed service, migrate later       |
+| Risk                                      | Impact | Likelihood | Mitigation                                                          |
+| ----------------------------------------- | ------ | ---------- | ------------------------------------------------------------------- |
+| flutter_webrtc plugin limitations         | Medium | Medium     | Plugin wraps libwebrtc; contribute patches upstream if needed       |
+| P2P success rate too low → high TURN cost | Medium | Medium     | ICE optimization, monitor early, adjust pricing                     |
+| CallKit/ConnectionService API changes     | Medium | Low        | Abstract call management layer, version check                       |
+| callkeep plugin maintenance               | Medium | Medium     | Plugin wraps CallKit+ConnectionService; fork if maintainer inactive |
+| LiveKit performance at scale              | High   | Low        | Load test early (Phase A), have fallback plan                       |
+| Cross-region latency unacceptable         | Medium | Medium     | Choose nearby regions, CDN for signaling                            |
+| ClickHouse operational complexity         | Low    | Medium     | Start with managed service, migrate later                           |
 
 ---
 

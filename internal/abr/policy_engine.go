@@ -123,10 +123,10 @@ type PolicyEngine struct {
 	qualityCfg  config.QualityConfig
 	roomService *lk.RoomService
 
-	mu       sync.RWMutex
-	metrics  map[string]*ParticipantMetrics // key: "room:identity"
-	stop     chan struct{}
-	running  bool
+	mu      sync.RWMutex
+	metrics map[string]*ParticipantMetrics // key: "room:identity"
+	stop    chan struct{}
+	running bool
 }
 
 // NewPolicyEngine creates a new policy engine.
@@ -224,6 +224,29 @@ func (e *PolicyEngine) RemoveParticipant(roomName, identity string) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	delete(e.metrics, key)
+}
+
+// GetParticipantPolicy returns the current evaluated policy for a participant.
+// Returns nil when no metrics are available or no rules are currently triggered.
+func (e *PolicyEngine) GetParticipantPolicy(roomName, identity string) *PolicyDecision {
+	key := roomName + ":" + identity
+
+	e.mu.RLock()
+	pm, ok := e.metrics[key]
+	if !ok {
+		e.mu.RUnlock()
+		return nil
+	}
+
+	copyPM := &ParticipantMetrics{
+		Identity:  pm.Identity,
+		RoomName:  pm.RoomName,
+		UpdatedAt: pm.UpdatedAt,
+		Samples:   append([]MetricSample(nil), pm.Samples...),
+	}
+	e.mu.RUnlock()
+
+	return e.EvaluateParticipant(copyPM)
 }
 
 // EvaluateParticipant evaluates rules for a single participant.

@@ -1,12 +1,12 @@
 # Technical Design Specification v1 — Adaptive Voice/Video Call System
 
-| Field        | Value                                      |
-| ------------ | ------------------------------------------ |
-| **Version**  | 1.0                                        |
-| **Status**   | Draft                                      |
-| **Created**  | 2026-02-25                                 |
-| **Authors**  | ITPRO                                      |
-| **Platform** | Mobile-first (iOS / Android); web deferred |
+| Field        | Value                                                |
+| ------------ | ---------------------------------------------------- |
+| **Version**  | 1.0                                                  |
+| **Status**   | Draft                                                |
+| **Created**  | 2026-02-25                                           |
+| **Authors**  | ITPRO                                                |
+| **Platform** | Mobile-first (Flutter — iOS + Android); web deferred |
 
 ---
 
@@ -53,7 +53,7 @@ Hệ thống voice/video call real-time cho mobile app với 500k MAU. Thiết k
 | Active video display | 4 slots (2 HQ + 2 MQ), còn lại LQ/paused   |
 | Adaptive quality     | 2-loop ABR (fast bitrate + slow codec)     |
 | Transport encryption | DTLS-SRTP for media, TLS 1.3 for signaling |
-| Platform             | iOS (Swift) + Android (Kotlin)             |
+| Platform             | Flutter (Dart) — iOS + Android             |
 
 ### Out of Scope (v1)
 
@@ -84,13 +84,12 @@ Hệ thống voice/video call real-time cho mobile app với 500k MAU. Thiết k
 ```
 ┌──────────────────────────────────────────────────────────────────┐
 │                        CLIENT LAYER                              │
-│  ┌──────────┐    ┌──────────┐                                    │
-│  │  iOS App  │    │ Android  │    (libwebrtc native)              │
-│  │  CallKit  │    │ ConnSvc  │                                    │
-│  └─────┬─────┘    └─────┬────┘                                   │
-│        │                │                                        │
-│        └───────┬────────┘                                        │
-│                │ WSS (signaling) + HTTPS (API)                   │
+│  ┌──────────────────────────────┐                                │
+│  │       Flutter App            │                                │
+│  │  flutter_webrtc + callkeep   │                                │
+│  │  (iOS CallKit / Android CS) │                                │
+│  └──────────────┬───────────────┘                                │
+│                 │ WSS (signaling) + HTTPS (API)                  │
 └────────────────┼─────────────────────────────────────────────────┘
                  │
 ┌────────────────┼─────────────────────────────────────────────────┐
@@ -172,23 +171,23 @@ Hệ thống voice/video call real-time cho mobile app với 500k MAU. Thiết k
 
 ### 4.1 Complete Stack
 
-| Layer             | Technology                                 | Version / Notes                          |
-| ----------------- | ------------------------------------------ | ---------------------------------------- |
-| **Client SDK**    | libwebrtc (native)                         | M120+ branch, per-platform build         |
-| **iOS**           | Swift + CallKit                            | iOS 15+                                  |
-| **Android**       | Kotlin + ConnectionService                 | API 26+                                  |
-| **SFU**           | LiveKit OSS                                | Self-hosted, Go-based                    |
-| **TURN/STUN**     | coturn                                     | Per-region deployment                    |
-| **Backend**       | Go                                         | 1.22+, signaling + orchestrator + policy |
-| **Signaling**     | WebSocket (gorilla/websocket)              | JSON-based protocol                      |
-| **State**         | Redis Cluster                              | 7.x, session + presence                  |
-| **Database**      | PostgreSQL                                 | 16+, metadata + config                   |
-| **Analytics**     | ClickHouse                                 | QoS metrics, CDR                         |
-| **Events**        | NATS                                       | JetStream for durability                 |
-| **Infra**         | Kubernetes                                 | Multi-AZ, HPA-enabled                    |
-| **DNS**           | GeoDNS                                     | Latency-based routing                    |
-| **Observability** | OTel + Prometheus + Grafana + Loki + Tempo | Full stack                               |
-| **CI/CD**         | GitHub Actions                             | Build + test + deploy                    |
+| Layer             | Technology                                 | Version / Notes                             |
+| ----------------- | ------------------------------------------ | ------------------------------------------- |
+| **Client SDK**    | flutter_webrtc                             | ^0.12.0, wraps libwebrtc for Flutter        |
+| **Mobile**        | Flutter (Dart)                             | iOS 15+ / Android API 26+                   |
+| **Native Bridge** | callkeep + firebase_messaging              | CallKit (iOS) / ConnectionService (Android) |
+| **SFU**           | LiveKit OSS                                | Self-hosted, Go-based                       |
+| **TURN/STUN**     | coturn                                     | Per-region deployment                       |
+| **Backend**       | Go                                         | 1.22+, signaling + orchestrator + policy    |
+| **Signaling**     | WebSocket (gorilla/websocket)              | JSON-based protocol                         |
+| **State**         | Redis Cluster                              | 7.x, session + presence                     |
+| **Database**      | PostgreSQL                                 | 16+, metadata + config                      |
+| **Analytics**     | ClickHouse                                 | QoS metrics, CDR                            |
+| **Events**        | NATS                                       | JetStream for durability                    |
+| **Infra**         | Kubernetes                                 | Multi-AZ, HPA-enabled                       |
+| **DNS**           | GeoDNS                                     | Latency-based routing                       |
+| **Observability** | OTel + Prometheus + Grafana + Loki + Tempo | Full stack                                  |
+| **CI/CD**         | GitHub Actions                             | Build + test + deploy                       |
 
 ### 4.2 Codec Support
 
@@ -199,14 +198,15 @@ Hệ thống voice/video call real-time cho mobile app với 500k MAU. Thiết k
 
 ### 4.3 Why This Stack
 
-| Decision                    | Rationale                                                             |
-| --------------------------- | --------------------------------------------------------------------- |
-| LiveKit over mediasoup      | Go-native (matches backend), better K8s integration, active community |
-| coturn over cloud TURN      | Cost control — cloud TURN is per-GB, coturn is fixed infra cost       |
-| Go for backend              | Low latency, excellent concurrency, matches LiveKit ecosystem         |
-| NATS over RabbitMQ          | Lower latency, simpler ops, JetStream covers durability needs         |
-| ClickHouse over TimescaleDB | Better compression for high-cardinality QoS metrics                   |
-| Redis Cluster over single   | HA required for session state, partition tolerance                    |
+| Decision                           | Rationale                                                                                                     |
+| ---------------------------------- | ------------------------------------------------------------------------------------------------------------- |
+| LiveKit over mediasoup             | Go-native (matches backend), better K8s integration, active community                                         |
+| coturn over cloud TURN             | Cost control — cloud TURN is per-GB, coturn is fixed infra cost                                               |
+| Go for backend                     | Low latency, excellent concurrency, matches LiveKit ecosystem                                                 |
+| NATS over RabbitMQ                 | Lower latency, simpler ops, JetStream covers durability needs                                                 |
+| ClickHouse over TimescaleDB        | Better compression for high-cardinality QoS metrics                                                           |
+| Redis Cluster over single          | HA required for session state, partition tolerance                                                            |
+| Flutter over native (Swift/Kotlin) | Single codebase, faster iteration, flutter_webrtc wraps libwebrtc, callkeep handles CallKit/ConnectionService |
 
 ---
 
@@ -460,24 +460,21 @@ Dù kiến trúc media/control plane tốt đến đâu, incoming call sẽ fail
                     │  Delivery Tracker│  ← track push sent/delivered/failed
                     └───────┬──────────┘
                             │
-              ┌─────────────┼─────────────┐
-              │                           │
-     ┌────────▼────────┐        ┌─────────▼────────┐
-     │   APNs (VoIP)   │        │  FCM (high-pri)  │
-     │   PushKit push  │        │  data message     │
-     └────────┬────────┘        └─────────┬────────┘
-              │                           │
-     ┌────────▼────────┐        ┌─────────▼────────┐
-     │   iOS Client    │        │  Android Client  │
-     │   PushKit       │        │  FirebaseMsg     │
-     │   delegate      │        │  Service         │
-     └────────┬────────┘        └─────────┬────────┘
-              │                           │
-     ┌────────▼────────┐        ┌─────────▼────────┐
-     │   CallKit       │        │  ConnectionSvc   │
-     │   reportNew     │        │  + ForegroundSvc │
-     │   IncomingCall  │        │  + FullScreenUI  │
-     └─────────────────┘        └──────────────────┘
+               ┌─────────────┼─────────────┐
+               │                           │
+      ┌────────▼────────┐        ┌─────────▼────────┐
+      │   APNs (VoIP)   │        │  FCM (high-pri)  │
+      │   PushKit push  │        │  data message     │
+      └────────┬────────┘        └─────────┬────────┘
+               │                           │
+               └─────────────┬─────────────┘
+                             │
+                ┌────────────▼────────────┐
+                │     Flutter Client      │
+                │  firebase_messaging     │
+                │  + callkeep plugin      │
+                │  (CallKit / ConnSvc)    │
+                └─────────────────────────┘
 ```
 
 #### 6.6.2 Push Token Management
@@ -522,47 +519,55 @@ CREATE TABLE push_tokens (
 CREATE INDEX idx_push_tokens_user ON push_tokens(user_id) WHERE is_active = true;
 ```
 
-#### 6.6.3 iOS — PushKit VoIP Push + CallKit
+#### 6.6.3 Flutter — callkeep + firebase_messaging Integration
 
-**Critical constraint:** iOS **BẮT BUỘC** phải gọi `provider.reportNewIncomingCall()` ngay trong `pushRegistry(_:didReceiveIncomingPushWith:)` callback. Nếu không gọi → iOS sẽ **kill app** và **revoke PushKit token**.
+Flutter dùng `callkeep` plugin để wrap native telephony integration trên cả hai platform:
+
+- `callkeep` wrap **CallKit (iOS)** và **ConnectionService (Android)**
+- `firebase_messaging` nhận push payload và bridge về native handlers
+- Dart layer chỉ xử lý signaling/media/state sau khi native incoming UI đã được trigger
+
+**Unified incoming flow (Flutter + native bridge):**
 
 ```
-APNs VoIP Push arrives
+Incoming push arrives (APNs VoIP / FCM data)
+        │
+        ▼
+┌──────────────────────────────────────────────────────────────┐
+│ Native layer (via callkeep + firebase_messaging)            │
+│                                                              │
+│ iOS path:                                                    │
+│  - PushKit callback nhận VoIP push                           │
+│  - callkeep iOS native code gọi reportNewIncomingCall() NGAY│
+│    (tuân thủ iOS constraint, trước mọi async work)           │
+│                                                              │
+│ Android path:                                                │
+│  - FirebaseMessagingService nhận FCM data message            │
+│  - Trigger callkeep để show incoming call UI                 │
+│    qua ConnectionService + ForegroundService                 │
+└──────────────────────────────────────────────────────────────┘
         │
         ▼
 ┌──────────────────────────────────────────────┐
-│  pushRegistry(_:didReceiveIncomingPushWith:)  │
-│                                              │
-│  1. Parse push payload                       │
-│  2. CXProvider.reportNewIncomingCall()  ◄──── BẮT BUỘC gọi NGAY
-│     - uuid: call_id from payload             │  (trước bất kỳ async work nào)
-│     - update: CXCallUpdate(remoteHandle...)  │
-│  3. Start WebSocket connection (background)  │
-│  4. Begin SDP exchange                       │
-└──────────────────────────────────────────────┘
-        │
-        ▼
-┌──────────────────────────┐
-│  CallKit Native UI shown │  (hệ thống hiện incoming call UI)
-│  ┌────────────────────┐  │
-│  │  [Decline] [Accept]│  │
-│  └────────────────────┘  │
-└──────────┬───────────────┘
-           │
-    ┌──────┴──────┐
-    │             │
- Accept        Decline
-    │             │
-    ▼             ▼
- provider       provider
- (_:perform     (_:perform
-  answer)        end)
-    │             │
-    ▼             │
- Connect WSS     └──► send DECLINE
- SDP/ICE              to signaling
- Media flow
+│ Native incoming call UI shown                │
+│ (CallKit on iOS / ConnectionService on Android) │
+└──────────────────────┬───────────────────────┘
+                       │
+             ┌─────────┴─────────┐
+             │                   │
+           Accept              Decline
+             │                   │
+             ▼                   ▼
+   callkeep event: answerCall    callkeep event: endCall
+             │                   │
+             ▼                   ▼
+   Flutter/Dart layer nhận event từ callkeep
+   → connect signaling (WSS)
+   → start SDP/ICE
+   → start media flow
 ```
+
+**Critical iOS constraint vẫn áp dụng:** iOS vẫn yêu cầu `reportNewIncomingCall` được gọi ngay trong PushKit callback. `callkeep` xử lý việc này ở native iOS code path.
 
 **Push payload (APNs VoIP):**
 
@@ -589,82 +594,35 @@ APNs VoIP Push arrives
 | Expiration  | `0` (don't store if device offline quá lâu) |
 | Collapse ID | `call_{call_id}` (dedup nếu push retry)     |
 
-#### 6.6.4 Android — FCM Data Message + Full-Screen Intent
+#### 6.6.4 Platform-Specific Native Configuration
 
-**Critical constraint:** PHẢI dùng FCM **data message** (không phải notification message). Notification message bị hệ thống handle trước khi app nhận → không thể show custom incoming call UI khi app background/killed.
+Mặc dù Flutter cung cấp unified API qua `callkeep` và `firebase_messaging`, vẫn cần cấu hình native cho mỗi platform:
 
-```
-FCM data message arrives (high priority)
-        │
-        ▼
-┌──────────────────────────────────────────────────┐
-│  FirebaseMessagingService.onMessageReceived()     │
-│                                                  │
-│  1. Parse data payload                           │
-│  2. Start Foreground Service (TYPE_PHONE_CALL)   │
-│     - Android 12+: TYPE_PHONE_CALL               │
-│     - Android < 12: TYPE_DEFAULT                 │
-│  3. Show Full-Screen Intent notification         │
-│     - USE_FULL_SCREEN_INTENT permission          │
-│     - fullScreenIntent → IncomingCallActivity    │
-│  4. ConnectionService.addNewIncomingCall()        │
-│  5. Start WebSocket connection                   │
-└──────────────────────────────────────────────────┘
-        │
-        ▼
-┌─────────────────────────────────────────┐
-│  IncomingCallActivity (full-screen)      │
-│  ┌───────────────────────────────────┐  │
-│  │  Caller: Nguyễn Văn A            │  │
-│  │  [Decline]           [Accept]    │  │
-│  └───────────────────────────────────┘  │
-└──────────┬──────────────────────────────┘
-           │
-    ┌──────┴──────┐
-    │             │
- Accept        Decline
-    │             │
-    ▼             ▼
- onAnswer()    onReject()
- Connect WSS   send DECLINE
- SDP/ICE       stop service
- Media flow
-```
+**iOS (Info.plist / Xcode):**
 
-**FCM message format:**
+- Background modes: `voip`, `audio`, `remote-notification`, `fetch`
+- PushKit entitlement enabled
+- CallKit permissions
 
-```json
-{
-  "to": "<fcm_token>",
-  "priority": "high",
-  "ttl": "45s",
-  "data": {
-    "type": "incoming_call",
-    "call_id": "uuid",
-    "caller_id": "uuid",
-    "caller_name": "Nguyễn Văn A",
-    "caller_avatar_url": "https://...",
-    "call_type": "audio|video",
-    "timestamp": "1708876543"
-  }
-}
-```
-
-> **Không dùng `notification` field** — chỉ dùng `data` field để đảm bảo `onMessageReceived()` luôn được gọi khi app background/killed.
-
-**Android permissions required:**
+**Android (AndroidManifest.xml):**
 
 ```xml
 <uses-permission android:name="android.permission.USE_FULL_SCREEN_INTENT" />
 <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
 <uses-permission android:name="android.permission.FOREGROUND_SERVICE_PHONE_CALL" />
 <uses-permission android:name="android.permission.MANAGE_OWN_CALLS" />
-<uses-permission android:name="android.permission.POST_NOTIFICATIONS" />  <!-- Android 13+ -->
+<uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
 ```
+
+- `FirebaseMessagingService` registered (native, triggers callkeep)
+- `ForegroundService` for ongoing call notification
+- `ConnectionService` with `CAPABILITY_SELF_MANAGED` PhoneAccount
+
+> Các cấu hình native này đã được setup sẵn trong Flutter project (`ios/Runner/Info.plist` và `android/app/src/main/AndroidManifest.xml`).
 
 #### 6.6.5 Client-Side Call State Machine
 
-Server-side state machine (§6.4) track trạng thái call. Client cần state machine riêng cho push → ring → connect flow:
+Server-side state machine (§6.4) track trạng thái call. Flutter client cần state machine riêng cho push → ring → connect flow (implemented via Riverpod StateNotifier):
 
 ```
                   ┌──────────┐
@@ -693,23 +651,23 @@ Server-side state machine (§6.4) track trạng thái call. Client cần state m
 
 **State transitions & actions:**
 
-| From       | Event            | To         | Action                                          |
-| ---------- | ---------------- | ---------- | ----------------------------------------------- |
-| IDLE       | user_initiate    | CALLING    | Send `call_initiate` via WSS                    |
-| IDLE       | push_received    | INCOMING   | Show native call UI (CallKit/ConnectionService) |
-| IDLE       | wss_incoming     | INCOMING   | Show native call UI (dedup với push)            |
-| INCOMING   | user_accept      | CONNECTING | Send `call_accept`, start SDP/ICE               |
-| INCOMING   | user_decline     | ENDED      | Send `call_decline`, dismiss UI                 |
-| INCOMING   | timeout (45s)    | ENDED      | Send `call_timeout`, dismiss UI                 |
-| CALLING    | callee_accept    | CONNECTING | Start SDP/ICE exchange                          |
-| CALLING    | callee_decline   | ENDED      | Show "declined" UI                              |
-| CALLING    | user_cancel      | ENDED      | Send `call_cancel`                              |
-| CALLING    | timeout (45s)    | ENDED      | Show "no answer" UI                             |
-| CONNECTING | media_flowing    | ACTIVE     | Show in-call UI                                 |
-| CONNECTING | ice_timeout(15s) | ENDED      | Show "connection failed" UI                     |
-| ACTIVE     | user_hangup      | ENDED      | Send `call_end`, stop media                     |
-| ACTIVE     | remote_hangup    | ENDED      | Show "call ended" UI, stop media                |
-| ENDED      | cleanup_done     | IDLE       | Release all resources                           |
+| From       | Event            | To         | Action                                                     |
+| ---------- | ---------------- | ---------- | ---------------------------------------------------------- |
+| IDLE       | user_initiate    | CALLING    | Send `call_initiate` via WSS                               |
+| IDLE       | push_received    | INCOMING   | Show native call UI (callkeep → CallKit/ConnectionService) |
+| IDLE       | wss_incoming     | INCOMING   | Show native call UI (dedup với push)                       |
+| INCOMING   | user_accept      | CONNECTING | Send `call_accept`, start SDP/ICE                          |
+| INCOMING   | user_decline     | ENDED      | Send `call_decline`, dismiss UI                            |
+| INCOMING   | timeout (45s)    | ENDED      | Send `call_timeout`, dismiss UI                            |
+| CALLING    | callee_accept    | CONNECTING | Start SDP/ICE exchange                                     |
+| CALLING    | callee_decline   | ENDED      | Show "declined" UI                                         |
+| CALLING    | user_cancel      | ENDED      | Send `call_cancel`                                         |
+| CALLING    | timeout (45s)    | ENDED      | Show "no answer" UI                                        |
+| CONNECTING | media_flowing    | ACTIVE     | Show in-call UI                                            |
+| CONNECTING | ice_timeout(15s) | ENDED      | Show "connection failed" UI                                |
+| ACTIVE     | user_hangup      | ENDED      | Send `call_end`, stop media                                |
+| ACTIVE     | remote_hangup    | ENDED      | Show "call ended" UI, stop media                           |
+| ENDED      | cleanup_done     | IDLE       | Release all resources                                      |
 
 #### 6.6.6 Race Conditions & Deduplication
 
@@ -719,7 +677,7 @@ Server-side state machine (§6.4) track trạng thái call. Client cần state m
 | Push arrives nhưng WSS đã connected         | Ưu tiên WSS event (lower latency). Push → check state → nếu đã INCOMING → skip            |
 | Push arrives sau khi caller cancel          | Push payload có `ttl` + `timestamp`. Client check call validity via WSS trước khi show UI |
 | Multiple devices cùng user nhận push        | First device accept → server broadcast `call_accepted` → other devices dismiss            |
-| CallKit report trước khi có call info       | Dùng placeholder data, update via `CXCallUpdate` khi WSS connected                        |
+| CallKit report trước khi có call info       | Dùng placeholder data, update via callkeep `updateDisplay()` khi WSS connected            |
 
 #### 6.6.7 Push Delivery Reliability
 
@@ -1059,16 +1017,16 @@ Test dưới các condition kết hợp:
 
 ### 12.2 Mobile-Specific Tests
 
-| Test Case                | Steps                                  | Expected                             |
-| ------------------------ | -------------------------------------- | ------------------------------------ |
-| WiFi → 4G handover       | Disable WiFi during call               | ICE restart, < 2s interruption       |
-| 4G → WiFi handover       | Connect WiFi during call               | Seamless switch, quality upgrade     |
-| Background → Foreground  | Press home during call                 | Audio continues (CallKit/ConnSvc)    |
-| Push notification wakeup | Call when app killed                   | VoIP push wakes app, ring UI shows   |
-| Low battery mode         | Enable low power mode during call      | Reduce video quality, maintain audio |
-| Thermal throttle         | Sustained call > 10 min on weak device | Graceful quality reduction           |
-| Airplane mode toggle     | Toggle airplane mode briefly           | Reconnect attempt, eventual recovery |
-| Dual SIM                 | Call on SIM1, data on SIM2             | Correct interface selection          |
+| Test Case                | Steps                                  | Expected                                |
+| ------------------------ | -------------------------------------- | --------------------------------------- |
+| WiFi → 4G handover       | Disable WiFi during call               | ICE restart, < 2s interruption          |
+| 4G → WiFi handover       | Connect WiFi during call               | Seamless switch, quality upgrade        |
+| Background → Foreground  | Press home during call                 | Audio continues (callkeep manages)      |
+| Push notification wakeup | Call when app killed                   | callkeep + firebase_messaging wakes app |
+| Low battery mode         | Enable low power mode during call      | Reduce video quality, maintain audio    |
+| Thermal throttle         | Sustained call > 10 min on weak device | Graceful quality reduction              |
+| Airplane mode toggle     | Toggle airplane mode briefly           | Reconnect attempt, eventual recovery    |
+| Dual SIM                 | Call on SIM1, data on SIM2             | Correct interface selection             |
 
 ### 12.3 Load Testing
 
@@ -1098,16 +1056,15 @@ Test dưới các condition kết hợp:
 
 ### Phase A — MVP (8–12 weeks)
 
-| Deliverable               | Detail                                       |
-| ------------------------- | -------------------------------------------- |
-| 1:1 voice call            | P2P + TURN fallback, Opus audio              |
-| 1:1 video call            | VP8/H264, basic ABR (fast loop only)         |
-| Signaling server          | Call state machine, SDP/ICE exchange         |
-| coturn deployment         | Single-region, 2-3 nodes                     |
-| Basic SFU                 | LiveKit, 2-3 person test                     |
-| iOS CallKit integration   | VoIP push, incoming call UI                  |
-| Android ConnectionService | Foreground service, incoming call            |
-| Basic quality metrics     | Client-side collection, ClickHouse ingestion |
+| Deliverable                  | Detail                                                        |
+| ---------------------------- | ------------------------------------------------------------- |
+| 1:1 voice call               | P2P + TURN fallback, Opus audio                               |
+| 1:1 video call               | VP8/H264, basic ABR (fast loop only)                          |
+| Signaling server             | Call state machine, SDP/ICE exchange                          |
+| coturn deployment            | Single-region, 2-3 nodes                                      |
+| Basic SFU                    | LiveKit, 2-3 person test                                      |
+| Flutter callkeep integration | CallKit (iOS) / ConnectionService (Android), incoming call UI |
+| Basic quality metrics        | Client-side collection, ClickHouse ingestion                  |
 
 **Exit Criteria**: 1:1 calls work reliably with < 2s setup, audio quality good on 4G.
 
@@ -1260,3 +1217,10 @@ rate_limits:
 ---
 
 _Document version: 1.0 | Last updated: 2026-02-25_
+
+### Risk Register
+
+| Risk                              | Impact | Probability | Mitigation                                                            |
+| --------------------------------- | ------ | ----------- | --------------------------------------------------------------------- |
+| flutter_webrtc plugin limitations | Medium | Medium      | flutter_webrtc wraps libwebrtc; contribute patches upstream if needed |
+| callkeep plugin maintenance       | Medium | Medium      | Plugin covers CallKit+ConnectionService; fork if maintainer inactive  |

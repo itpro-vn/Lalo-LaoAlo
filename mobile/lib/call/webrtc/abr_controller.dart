@@ -18,8 +18,7 @@ class AbrEncodingParams {
   final double scaleResolutionDownBy;
 
   @override
-  String toString() =>
-      'AbrEncodingParams(bitrate=${maxBitrateKbps}kbps, '
+  String toString() => 'AbrEncodingParams(bitrate=${maxBitrateKbps}kbps, '
       'fps=$maxFramerate, scale=$scaleResolutionDownBy)';
 
   @override
@@ -158,7 +157,8 @@ class AbrController {
     if (_loopTimer != null) return;
 
     // Subscribe to quality stats for bandwidth estimation
-    _statsSubscription = _qualityMonitor.onQualityStats.listen(_updateBandwidth);
+    _statsSubscription =
+        _qualityMonitor.onQualityStats.listen(_updateBandwidth);
 
     // Run ABR loop at configured interval
     _loopTimer = Timer.periodic(
@@ -188,8 +188,7 @@ class AbrController {
   void _updateBandwidth(QualityStats stats) {
     final prev = _previousStats;
     if (prev != null) {
-      final elapsed =
-          stats.timestamp.difference(prev.timestamp).inMilliseconds;
+      final elapsed = stats.timestamp.difference(prev.timestamp).inMilliseconds;
       if (elapsed > 0) {
         final deltaBytes = stats.bytesSent - prev.bytesSent;
         // bytes / ms * 1000 = bytes/s, then / 125 = kbps
@@ -222,8 +221,7 @@ class AbrController {
     }
 
     // Apply encoding params if changed
-    if (!decision.videoDisabled &&
-        decision.params != _lastAppliedParams) {
+    if (!decision.videoDisabled && decision.params != _lastAppliedParams) {
       final applied = await _peerConnectionManager.setVideoEncodingParameters(
         maxBitrateKbps: decision.params.maxBitrateKbps,
         maxFramerate: decision.params.maxFramerate,
@@ -424,6 +422,21 @@ class SimulcastAbrController {
   Set<SimulcastLayer>? get lastActiveLayers => _lastActiveLayers;
   Stream<SimulcastAbrDecision> get onDecision => _decisionController.stream;
 
+  /// External tier override (from slow loop coordination).
+  ///
+  /// When set, the fast loop uses this tier instead of the raw network tier
+  /// from [QualityMonitor]. This ensures battery/thermal/policy reductions
+  /// from the slow loop are respected by the fast loop.
+  QualityTier? _tierOverride;
+
+  /// Sets an external tier override for the fast loop.
+  void setTierOverride(QualityTier? tier) {
+    _tierOverride = tier;
+  }
+
+  /// Returns the current tier override, if any.
+  QualityTier? get tierOverride => _tierOverride;
+
   /// Starts the simulcast ABR loop.
   void start() {
     if (_loopTimer != null) return;
@@ -458,8 +471,7 @@ class SimulcastAbrController {
   void _updateBandwidth(QualityStats stats) {
     final prev = _previousStats;
     if (prev != null) {
-      final elapsed =
-          stats.timestamp.difference(prev.timestamp).inMilliseconds;
+      final elapsed = stats.timestamp.difference(prev.timestamp).inMilliseconds;
       if (elapsed > 0) {
         final deltaBytes = stats.bytesSent - prev.bytesSent;
         _estimatedBandwidthKbps =
@@ -473,8 +485,11 @@ class SimulcastAbrController {
     final stats = _qualityMonitor.latestStats;
     if (stats == null) return;
 
+    // Use tier override from slow loop coordination if available.
+    final effectiveTier = _tierOverride ?? stats.tier;
+
     final decision = computeDecision(
-      tier: stats.tier,
+      tier: effectiveTier,
       rttMs: stats.roundTripTimeMs ?? 0,
       bandwidthKbps: _estimatedBandwidthKbps,
     );
