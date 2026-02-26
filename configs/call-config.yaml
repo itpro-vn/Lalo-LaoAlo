@@ -1,0 +1,82 @@
+# call-config.yaml
+call:
+  ring_timeout_seconds: 45
+  ice_timeout_seconds: 15
+  cleanup_timeout_seconds: 5
+  max_reconnect_attempts: 3
+  reconnect_backoff: [0, 1000, 3000] # ms
+
+quality:
+  tiers:
+    good:
+      rtt_max_ms: 120
+      loss_max_pct: 2
+      jitter_max_ms: 20
+    fair:
+      rtt_max_ms: 250
+      loss_max_pct: 6
+      jitter_max_ms: 50
+    poor:
+      rtt_above_ms: 250
+      loss_above_pct: 6
+      jitter_above_ms: 50
+
+  hysteresis:
+    upgrade_stable_seconds: 10
+    downgrade_fair_seconds: 2
+    downgrade_poor_seconds: 1
+    max_codec_change_interval_seconds: 30
+
+  audio:
+    codec: opus
+    dtx: true
+    fec_threshold_loss_pct: 2
+    bitrate_range_kbps: [12, 32]
+
+  video:
+    codecs: [vp8, h264]
+    simulcast_layers: 3
+    max_resolution: 720p
+    max_framerate: 30
+    keyframe_interval_seconds: 2
+
+  bandwidth:
+    audio_only_threshold_kbps: 100
+    video_resume_threshold_kbps: 200
+    video_resume_stable_seconds: 10
+
+group:
+  max_participants: 8
+  active_video_slots: 4
+  hq_slots: 2
+  mq_slots: 2
+  speaker_detection_threshold_db: -40
+  speaker_hold_seconds: 3
+
+turn:
+  allocation_ttl_seconds: 600
+  max_allocations_per_user: 5
+  credential_ttl_seconds: 86400
+  servers:
+    - "turn:localhost:3478"
+  health_check_interval_seconds: 10
+  health_check_timeout_seconds: 5
+
+push:
+  port: 8082
+  apns:
+    team_id: ""
+    key_id: ""
+    key_path: ""
+    bundle_id: "com.lalo.app"
+    production: false
+  fcm:
+    server_key: ""
+    project_id: ""
+
+rate_limits:
+  call_initiate_per_user: "10/min"
+  call_initiate_global_cps: 500
+  signaling_messages_per_connection: "100/min"
+  turn_allocations_per_user: "5/min"
+  api_requests_per_user: "60/min"

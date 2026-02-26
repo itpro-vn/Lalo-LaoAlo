@@ -1,0 +1,35 @@
+# LiveKit SFU Configuration — Phase A (single node)
+port: 7880
+rtc:
+  port_range_start: 50000
+  port_range_end: 60000
+  use_external_ip: true
+  tcp_fallback_port: 7881
+
+redis:
+  address: redis:6379
+
+keys:
+  lalo-api-key: lalo-api-secret-dev
+
+room:
+  # Max participants per room
+  max_participants: 8
+  # Empty room timeout
+  empty_timeout: 300 # 5 min
+
+  # Auto-create on first join if room doesn't exist
+  auto_create: false
+
+logging:
+  level: info
+  json: true
+
+webhook:
+  # Webhook URL — orchestrator will listen here
+  urls:
+    - http://host.docker.internal:8081/webhook/livekit
+  api_key: lalo-api-key
+
+# Prometheus metrics
+prometheus_port: 7889
