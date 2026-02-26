@@ -114,6 +114,11 @@ func (c *Client) WritePump() {
 
 // SendJSON marshals the message and sends it to the client.
 func (c *Client) SendJSON(msgType string, data any) error {
+	return c.SendJSONWithSeq(msgType, data, 0)
+}
+
+// SendJSONWithSeq marshals the message with a sequence number and sends it.
+func (c *Client) SendJSONWithSeq(msgType string, data any, seq int64) error {
 	payload, err := json.Marshal(data)
 	if err != nil {
 		return err
@@ -122,6 +127,7 @@ func (c *Client) SendJSON(msgType string, data any) error {
 	env := Envelope{
 		Type: msgType,
 		Data: payload,
+		Seq:  seq,
 	}
 
 	msg, err := json.Marshal(env)

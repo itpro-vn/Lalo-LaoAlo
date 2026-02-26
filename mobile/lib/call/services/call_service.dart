@@ -1,9 +1,11 @@
 import 'dart:async';
 
+import 'package:flutter/foundation.dart' show visibleForTesting;
 import 'package:flutter_webrtc/flutter_webrtc.dart' as webrtc;
 
 import 'package:lalo/call/models/call_session.dart';
 import 'package:lalo/call/models/call_state.dart';
+import 'package:lalo/call/models/signaling_edge_events.dart';
 import 'package:lalo/call/webrtc/abr_controller.dart';
 import 'package:lalo/call/webrtc/media_manager.dart';
 import 'package:lalo/call/webrtc/peer_connection_manager.dart';
@@ -35,6 +37,13 @@ class CallService {
       StreamController<QualityStats>.broadcast();
   final StreamController<ReconnectionState> _reconnectionStateController =
       StreamController<ReconnectionState>.broadcast();
+  final StreamController<CallGlareEvent> _glareController =
+      StreamController<CallGlareEvent>.broadcast();
+  final StreamController<CallAcceptedElsewhereEvent>
+      _acceptedElsewhereController =
+      StreamController<CallAcceptedElsewhereEvent>.broadcast();
+  final StreamController<StateSyncEvent> _stateSyncController =
+      StreamController<StateSyncEvent>.broadcast();
 
   CallSession? _currentSession;
   bool _isMuted = false;
@@ -60,6 +69,10 @@ class CallService {
   Stream<QualityStats> get onQualityStats => _qualityStatsController.stream;
   Stream<ReconnectionState> get onReconnectionState =>
       _reconnectionStateController.stream;
+  Stream<CallGlareEvent> get onGlare => _glareController.stream;
+  Stream<CallAcceptedElsewhereEvent> get onAcceptedElsewhere =>
+      _acceptedElsewhereController.stream;
+  Stream<StateSyncEvent> get onStateSync => _stateSyncController.stream;
 
   /// Whether video was disabled by ABR due to low bandwidth.
   bool get isVideoDisabledByAbr =>
@@ -200,9 +213,42 @@ class CallService {
       case msgSessionResumed:
         // Session resumed after our own reconnect
         _callStateController.add(CallState.active);
+      case msgCallGlare:
+        _handleCallGlare(message.data);
+      case msgCallAcceptedElsewhere:
+        _handleCallAcceptedElsewhere(message.data);
+      case msgStateSync:
+        _handleStateSync(message.data);
       default:
         break;
     }
+  }
+
+  void _handleCallGlare(Map<String, dynamic> data) {
+    final event = CallGlareEvent.fromJson(data);
+    _glareController.add(event);
+
+    // Auto-end the cancelled call if it's our current session
+    if (_currentSession?.callId == event.cancelledCallId) {
+      _callStateController.add(CallState.ended);
+      _currentSession = null;
+    }
+  }
+
+  void _handleCallAcceptedElsewhere(Map<String, dynamic> data) {
+    final event = CallAcceptedElsewhereEvent.fromJson(data);
+    _acceptedElsewhereController.add(event);
+
+    // Dismiss the incoming call on this device
+    if (_currentSession?.callId == event.callId) {
+      _callStateController.add(CallState.ended);
+      _currentSession = null;
+    }
+  }
+
+  void _handleStateSync(Map<String, dynamic> data) {
+    final event = StateSyncEvent.fromJson(data);
+    _stateSyncController.add(event);
   }
 
   void _stopReconnectionMonitoring() {
@@ -339,6 +385,22 @@ class CallService {
     _callStateController.add(CallState.incoming);
   }
 
+  // ---------------------------------------------------------------------------
+  // Test helpers
+  // ---------------------------------------------------------------------------
+
+  /// Sets the current session for testing purposes.
+  @visibleForTesting
+  void setCurrentSessionForTest(CallSession? session) {
+    _currentSession = session;
+  }
+
+  /// Processes a signaling message through the edge-case handler.
+  @visibleForTesting
+  void handleSignalingMessageForTest(SignalingMessage message) {
+    _handleReconnectMessage(message);
+  }
+
   Future<void> dispose() async {
     _stopQualityMonitoring();
     _stopReconnectionMonitoring();
@@ -347,6 +409,9 @@ class CallService {
     await _remoteStreamController.close();
     await _qualityStatsController.close();
     await _reconnectionStateController.close();
+    await _glareController.close();
+    await _acceptedElsewhereController.close();
+    await _stateSyncController.close();
   }
 }
 

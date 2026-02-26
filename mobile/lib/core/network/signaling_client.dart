@@ -32,6 +32,9 @@ const String msgPong = 'pong';
 const String msgSessionResumed = 'session_resumed';
 const String msgPeerReconnecting = 'peer_reconnecting';
 const String msgPeerReconnected = 'peer_reconnected';
+const String msgCallGlare = 'call_glare';
+const String msgCallAcceptedElsewhere = 'call_accepted_elsewhere';
+const String msgStateSync = 'state_sync';
 const String msgRoomCreated = 'room_created';
 const String msgRoomInvitation = 'room_invitation';
 const String msgRoomClosed = 'room_closed';
@@ -53,10 +56,21 @@ enum ConnectionState {
 /// Standard signaling envelope:
 /// `{"type": "...", "data": {...}}`.
 class SignalingMessage {
-  const SignalingMessage({required this.type, required this.data});
+  const SignalingMessage({
+    required this.type,
+    required this.data,
+    this.msgId,
+    this.seq,
+  });
 
   final String type;
   final Map<String, dynamic> data;
+
+  /// Client-generated dedup ID (sent to server).
+  final String? msgId;
+
+  /// Server-assigned sequence number (received from server).
+  final int? seq;
 
   factory SignalingMessage.fromJson(Map<String, dynamic> json) {
     final rawType = json['type'];
@@ -67,17 +81,20 @@ class SignalingMessage {
     }
 
     final rawData = json['data'];
+    Map<String, dynamic> data;
     if (rawData == null) {
-      return SignalingMessage(type: rawType, data: const <String, dynamic>{});
-    }
-
-    if (rawData is! Map) {
+      data = const <String, dynamic>{};
+    } else if (rawData is! Map) {
       throw const FormatException('Signaling message data must be an object');
+    } else {
+      data = Map<String, dynamic>.from(rawData);
     }
 
     return SignalingMessage(
       type: rawType,
-      data: Map<String, dynamic>.from(rawData),
+      data: data,
+      msgId: json['msg_id'] as String?,
+      seq: json['seq'] as int?,
     );
   }
 
@@ -85,6 +102,8 @@ class SignalingMessage {
     return <String, dynamic>{
       'type': type,
       'data': data,
+      if (msgId != null) 'msg_id': msgId,
+      if (seq != null) 'seq': seq,
     };
   }
 }

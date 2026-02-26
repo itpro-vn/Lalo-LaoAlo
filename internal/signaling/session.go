@@ -193,6 +193,81 @@ func (s *SessionStore) GetUserActiveCall(ctx context.Context, userID string) (st
 	return callID, nil
 }
 
+// FindGlareCall checks if calleeID has an active/ringing call TO callerID.
+// Returns the conflicting call session if found (glare detected), or nil.
+func (s *SessionStore) FindGlareCall(ctx context.Context, callerID, calleeID string) (*CallSession, error) {
+	// Check if the callee already has an active call
+	callID, err := s.GetUserActiveCall(ctx, calleeID)
+	if err != nil || callID == "" {
+		return nil, err
+	}
+
+	sess, err := s.Get(ctx, callID)
+	if err != nil {
+		return nil, err
+	}
+
+	// Glare: callee is the caller of the existing call, and the callerID is the callee
+	if sess.CallerID == calleeID && sess.CalleeID == callerID && sess.State == StateRinging {
+		return sess, nil
+	}
+
+	return nil, nil
+}
+
+// ScanActiveSessions scans Redis for all active sessions (for state recovery on startup).
+func (s *SessionStore) ScanActiveSessions(ctx context.Context) ([]*CallSession, error) {
+	var sessions []*CallSession
+	var cursor uint64
+
+	for {
+		keys, nextCursor, err := s.rdb.Scan(ctx, cursor, "session:*", 100).Result()
+		if err != nil {
+			return nil, fmt.Errorf("scan sessions: %w", err)
+		}
+
+		for _, key := range keys {
+			data, err := s.rdb.Get(ctx, key).Bytes()
+			if err != nil {
+				continue // skip deleted/expired
+			}
+
+			var sess CallSession
+			if err := json.Unmarshal(data, &sess); err != nil {
+				continue // skip corrupted
+			}
+
+			// Only include non-terminal sessions
+			if sess.State != StateEnded && sess.State != StateCleanup {
+				sessions = append(sessions, &sess)
+			}
+		}
+
+		cursor = nextCursor
+		if cursor == 0 {
+			break
+		}
+	}
+
+	return sessions, nil
+}
+
+// CheckMsgDedup checks if a message ID has been seen before.
+// Returns true if duplicate (already processed). Sets the ID with 60s TTL if new.
+func (s *SessionStore) CheckMsgDedup(ctx context.Context, msgID string) (bool, error) {
+	if msgID == "" {
+		return false, nil // No dedup for messages without ID
+	}
+
+	key := fmt.Sprintf("msgdedup:%s", msgID)
+	set, err := s.rdb.SetNX(ctx, key, 1, 60*time.Second).Result()
+	if err != nil {
+		return false, err
+	}
+
+	return !set, nil // set=false means key already existed (duplicate)
+}
+
 // Delete removes a session and associated keys from Redis.
 func (s *SessionStore) Delete(ctx context.Context, callID string) error {
 	session, err := s.Get(ctx, callID)

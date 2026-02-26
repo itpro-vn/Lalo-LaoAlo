@@ -4,7 +4,9 @@ import (
 	"context"
 	"encoding/json"
 	"log"
+	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/google/uuid"
@@ -15,9 +17,14 @@ import (
 
 // Hub maintains the set of active clients and routes messages.
 type Hub struct {
-	// Registered clients indexed by userID.
-	clients   map[string]*Client
+	// Registered clients indexed by userID → deviceID → Client.
+	// Supports multiple devices per user for multi-device ringing.
+	clients   map[string]map[string]*Client
 	clientsMu sync.RWMutex
+
+	// Per-user outgoing sequence counter for message ordering.
+	seqCounters   map[string]*atomic.Int64
+	seqCountersMu sync.Mutex
 
 	// Room membership: roomID → set of userIDs.
 	rooms   map[string]map[string]bool
@@ -59,7 +66,8 @@ type Hub struct {
 func NewHub(sessions *SessionStore, bus *events.Bus, cfg *config.Config, orch *session.Orchestrator) *Hub {
 	ctx, cancel := context.WithCancel(context.Background())
 	return &Hub{
-		clients:     make(map[string]*Client),
+		clients:     make(map[string]map[string]*Client),
+		seqCounters: make(map[string]*atomic.Int64),
 		rooms:       make(map[string]map[string]bool),
 		graceTimers:     make(map[string]context.CancelFunc),
 		roomGraceTimers: make(map[string]context.CancelFunc),
@@ -82,37 +90,52 @@ func (h *Hub) Run() {
 		select {
 		case client := <-h.register:
 			h.clientsMu.Lock()
-			// Disconnect any existing connection for this user
-			if old, ok := h.clients[client.userID]; ok {
+			if h.clients[client.userID] == nil {
+				h.clients[client.userID] = make(map[string]*Client)
+			}
+			// If same device reconnects, close old connection
+			if old, ok := h.clients[client.userID][client.deviceID]; ok {
 				old.Close()
 			}
-			h.clients[client.userID] = client
+			h.clients[client.userID][client.deviceID] = client
 			h.clientsMu.Unlock()
 
 			// Cancel room grace timer if user is reconnecting while in rooms
 			if h.cancelRoomGracePeriod(client.userID) {
-				log.Printf("client re-registered (room grace cancelled): user=%s", client.userID)
+				log.Printf("client re-registered (room grace cancelled): user=%s device=%s", client.userID, client.deviceID)
 			} else {
-				log.Printf("client registered: user=%s", client.userID)
+				log.Printf("client registered: user=%s device=%s", client.userID, client.deviceID)
 			}
+
+			// State sync: send active call state to reconnecting client
+			h.sendStateSync(client)
 
 		case client := <-h.unregister:
 			h.clientsMu.Lock()
-			if existing, ok := h.clients[client.userID]; ok && existing == client {
-				delete(h.clients, client.userID)
+			if devices, ok := h.clients[client.userID]; ok {
+				if existing, hasDevice := devices[client.deviceID]; hasDevice && existing == client {
+					delete(devices, client.deviceID)
+					// If no more devices for this user, remove user entry
+					if len(devices) == 0 {
+						delete(h.clients, client.userID)
+					}
+				}
 			}
+			// Check if user still has connected devices
+			hasDevices := len(h.clients[client.userID]) > 0
 			h.clientsMu.Unlock()
 
-			// Check if user has an active call — if so, start grace period
-			// instead of immediately cleaning up.
+			if hasDevices {
+				log.Printf("device disconnected (other devices still connected): user=%s device=%s", client.userID, client.deviceID)
+				continue
+			}
+
+			// No devices left — handle grace periods or cleanup
 			if h.startGracePeriod(client.userID) {
 				log.Printf("client disconnected (grace period started): user=%s", client.userID)
 			} else if h.startRoomGracePeriod(client.userID) {
-				// User is in group rooms — start room grace period to avoid
-				// participant_left/joined churn on transient disconnects.
 				log.Printf("client disconnected (room grace period started): user=%s", client.userID)
 			} else {
-				// No active call or rooms — clean up immediately
 				h.removeFromAllRooms(client.userID)
 				log.Printf("client unregistered: user=%s", client.userID)
 			}
@@ -132,17 +155,97 @@ func (h *Hub) Stop() {
 
 	h.clientsMu.Lock()
 	defer h.clientsMu.Unlock()
-	for _, client := range h.clients {
-		client.Close()
+	for _, devices := range h.clients {
+		for _, client := range devices {
+			client.Close()
+		}
 	}
-	h.clients = make(map[string]*Client)
+	h.clients = make(map[string]map[string]*Client)
 }
 
-// getClient returns the client for a given userID.
+// getClient returns any connected client for a given userID (first device found).
+// For sending to specific device, use getClientDevice. For broadcast, use sendToUser.
 func (h *Hub) getClient(userID string) *Client {
 	h.clientsMu.RLock()
 	defer h.clientsMu.RUnlock()
-	return h.clients[userID]
+	for _, client := range h.clients[userID] {
+		return client // return first device
+	}
+	return nil
+}
+
+// getClientDevice returns the client for a specific user+device combo.
+func (h *Hub) getClientDevice(userID, deviceID string) *Client {
+	h.clientsMu.RLock()
+	defer h.clientsMu.RUnlock()
+	if devices, ok := h.clients[userID]; ok {
+		return devices[deviceID]
+	}
+	return nil
+}
+
+// sendToUser sends a message to ALL connected devices of a user.
+// Returns true if at least one device was reached.
+func (h *Hub) sendToUser(userID, msgType string, payload interface{}) bool {
+	h.clientsMu.RLock()
+	devices := h.clients[userID]
+	clients := make([]*Client, 0, len(devices))
+	for _, c := range devices {
+		clients = append(clients, c)
+	}
+	h.clientsMu.RUnlock()
+
+	if len(clients) == 0 {
+		return false
+	}
+
+	// Assign sequence number
+	seq := h.nextSeq(userID)
+	for _, c := range clients {
+		c.SendJSONWithSeq(msgType, payload, seq)
+	}
+	return true
+}
+
+// sendToUserExcept sends to all devices of a user except the specified device.
+func (h *Hub) sendToUserExcept(userID, excludeDeviceID, msgType string, payload interface{}) {
+	h.clientsMu.RLock()
+	devices := h.clients[userID]
+	clients := make([]*Client, 0, len(devices))
+	for did, c := range devices {
+		if did != excludeDeviceID {
+			clients = append(clients, c)
+		}
+	}
+	h.clientsMu.RUnlock()
+
+	if len(clients) == 0 {
+		return
+	}
+
+	seq := h.nextSeq(userID)
+	for _, c := range clients {
+		c.SendJSONWithSeq(msgType, payload, seq)
+	}
+}
+
+// nextSeq returns the next sequence number for a user.
+func (h *Hub) nextSeq(userID string) int64 {
+	h.seqCountersMu.Lock()
+	counter, ok := h.seqCounters[userID]
+	if !ok {
+		counter = &atomic.Int64{}
+		h.seqCounters[userID] = counter
+	}
+	h.seqCountersMu.Unlock()
+	return counter.Add(1)
+}
+
+// isUserOnline checks if a user has at least one connected device.
+func (h *Hub) isUserOnline(userID string) bool {
+	h.clientsMu.RLock()
+	defer h.clientsMu.RUnlock()
+	return len(h.clients[userID]) > 0
 }
 
 // handleMessage processes an incoming client message.
@@ -151,6 +254,17 @@ func (h *Hub) handleMessage(msg *ClientMessage) {
 	if err := json.Unmarshal(msg.payload, &env); err != nil {
 		msg.client.SendError(ErrCodeInvalidMessage, "invalid JSON", "")
 		return
+	}
+
+	// Message deduplication: if client sent a msg_id, check for duplicates
+	if env.MsgID != "" {
+		dup, err := h.sessions.CheckMsgDedup(h.ctx, env.MsgID)
+		if err != nil {
+			log.Printf("dedup check error: %v", err)
+		} else if dup {
+			msg.client.SendError(ErrCodeDuplicate, "duplicate message", "")
+			return
+		}
 	}
 
 	switch env.Type {
@@ -205,11 +319,17 @@ func (h *Hub) handleCallInitiate(caller *Client, data json.RawMessage) {
 		return
 	}
 
+	// SDP validation: basic format check
+	if !isValidSDP(msg.SDPOffer) {
+		caller.SendError(ErrCodeInvalidSDP, "invalid SDP format", "")
+		return
+	}
+
 	ctx := h.ctx
 	callID := uuid.New().String()
 
 	// Create session in Redis
-	session := &CallSession{
+	sess := &CallSession{
 		CallID:    callID,
 		CallerID:  caller.userID,
 		CalleeID:  msg.CalleeID,
@@ -219,8 +339,15 @@ func (h *Hub) handleCallInitiate(caller *Client, data json.RawMessage) {
 		StartedAt: time.Now(),
 	}
 
-	if err := h.sessions.Create(ctx, session); err != nil {
+	if err := h.sessions.Create(ctx, sess); err != nil {
 		if err == ErrUserBusy {
+			// Check for glare: is the callee calling us back?
+			glareSess, glareErr := h.sessions.FindGlareCall(ctx, caller.userID, msg.CalleeID)
+			if glareErr == nil && glareSess != nil {
+				// Glare detected! Resolve by lower user_id wins
+				h.resolveGlare(ctx, caller, glareSess, msg)
+				return
+			}
 			caller.SendError(ErrCodeBusy, "user is busy", "")
 			return
 		}
@@ -239,17 +366,18 @@ func (h *Hub) handleCallInitiate(caller *Client, data json.RawMessage) {
 		})
 	}
 
-	// Route incoming_call to callee
-	callee := h.getClient(msg.CalleeID)
-	if callee != nil {
-		callee.SendJSON(MsgIncomingCall, IncomingCallMsg{
-			CallID:   callID,
-			CallerID: caller.userID,
-			SDPOffer: msg.SDPOffer,
-			CallType: msg.CallType,
-		})
+	// Route incoming_call to ALL devices of callee (multi-device ringing)
+	reached := h.sendToUser(msg.CalleeID, MsgIncomingCall, IncomingCallMsg{
+		CallID:   callID,
+		CallerID: caller.userID,
+		SDPOffer: msg.SDPOffer,
+		CallType: msg.CallType,
+	})
+	if !reached {
+		// Callee is offline — will be handled by push notification
+		log.Printf("callee offline, call_id=%s callee=%s", callID, msg.CalleeID)
+		// TODO: Send push notification
 	}
-	// TODO: Send push notification if callee is offline
 
 	// Start ring timeout
 	go h.ringTimeout(callID)
@@ -264,14 +392,26 @@ func (h *Hub) handleCallAccept(callee *Client, data json.RawMessage) {
 
 	ctx := h.ctx
 
-	session, err := h.sessions.Get(ctx, msg.CallID)
+	sess, err := h.sessions.Get(ctx, msg.CallID)
 	if err != nil {
 		callee.SendError(ErrCodeNotFound, "call not found", msg.CallID)
 		return
 	}
 
-	if session.CalleeID != callee.userID {
+	if sess.CalleeID != callee.userID {
 		callee.SendError(ErrCodeUnauthorized, "not the callee", msg.CallID)
+		return
+	}
+
+	// Cancel-wins: if session was already ended/cancelled, report it
+	if sess.State == StateEnded || sess.State == StateCleanup {
+		callee.SendError(ErrCodeCallCancelled, "call was cancelled", msg.CallID)
+		return
+	}
+
+	// SDP validation for answer
+	if msg.SDPAnswer != "" && !isValidSDP(msg.SDPAnswer) {
+		callee.SendError(ErrCodeInvalidSDP, "invalid SDP answer format", msg.CallID)
 		return
 	}
 
@@ -281,6 +421,12 @@ func (h *Hub) handleCallAccept(callee *Client, data json.RawMessage) {
 		s.AnsweredAt = time.Now()
 	})
 	if err != nil {
+		// If transition fails because state changed (e.g. cancelled), check for cancel-wins
+		currentSess, getErr := h.sessions.Get(ctx, msg.CallID)
+		if getErr == nil && (currentSess.State == StateEnded || currentSess.State == StateCleanup) {
+			callee.SendError(ErrCodeCallCancelled, "call was cancelled", msg.CallID)
+			return
+		}
 		callee.SendError(ErrCodeInvalidState, err.Error(), msg.CallID)
 		return
 	}
@@ -293,14 +439,17 @@ func (h *Hub) handleCallAccept(callee *Client, data json.RawMessage) {
 		})
 	}
 
-	// Forward SDP answer to caller
-	caller := h.getClient(session.CallerID)
-	if caller != nil {
-		caller.SendJSON(MsgCallAccepted, CallAcceptedMsg{
-			CallID:    msg.CallID,
-			SDPAnswer: msg.SDPAnswer,
-		})
-	}
+	// Forward SDP answer to caller (all devices)
+	h.sendToUser(sess.CallerID, MsgCallAccepted, CallAcceptedMsg{
+		CallID:    msg.CallID,
+		SDPAnswer: msg.SDPAnswer,
+	})
+
+	// Multi-device: notify other devices of callee that call was accepted elsewhere
+	h.sendToUserExcept(callee.userID, callee.deviceID, MsgCallAcceptedElsewhere, CallAcceptedElsewhereMsg{
+		CallID:   msg.CallID,
+		DeviceID: callee.deviceID,
+	})
 
 	// Start ICE timeout
 	go h.iceTimeout(msg.CallID)
@@ -344,14 +493,11 @@ func (h *Hub) handleCallReject(callee *Client, data json.RawMessage) {
 		})
 	}
 
-	// Notify caller
-	caller := h.getClient(session.CallerID)
-	if caller != nil {
-		caller.SendJSON(MsgCallRejected, CallRejectedMsg{
-			CallID: msg.CallID,
-			Reason: reason,
-		})
-	}
+	// Notify caller (all devices)
+	h.sendToUser(session.CallerID, MsgCallRejected, CallRejectedMsg{
+		CallID: msg.CallID,
+		Reason: reason,
+	})
 }
 
 func (h *Hub) handleCallEnd(client *Client, data json.RawMessage) {
@@ -388,19 +534,16 @@ func (h *Hub) handleCallEnd(client *Client, data json.RawMessage) {
 		})
 	}
 
-	// Notify the other party
+	// Notify the other party (all devices)
 	peerID := session.CallerID
 	if client.userID == session.CallerID {
 		peerID = session.CalleeID
 	}
 
-	peer := h.getClient(peerID)
-	if peer != nil {
-		peer.SendJSON(MsgCallEnded, CallEndedMsg{
-			CallID: msg.CallID,
-			Reason: "normal",
-		})
-	}
+	h.sendToUser(peerID, MsgCallEnded, CallEndedMsg{
+		CallID: msg.CallID,
+		Reason: "normal",
+	})
 }
 
 func (h *Hub) handleCallCancel(caller *Client, data json.RawMessage) {
@@ -428,13 +571,10 @@ func (h *Hub) handleCallCancel(caller *Client, data json.RawMessage) {
 		return
 	}
 
-	// Notify callee
-	callee := h.getClient(session.CalleeID)
-	if callee != nil {
-		callee.SendJSON(MsgCallCancelled, CallCancelledMsg{
-			CallID: msg.CallID,
-		})
-	}
+	// Notify callee (all devices)
+	h.sendToUser(session.CalleeID, MsgCallCancelled, CallCancelledMsg{
+		CallID: msg.CallID,
+	})
 }
 
 func (h *Hub) handleICECandidate(client *Client, data json.RawMessage) {
@@ -500,15 +640,9 @@ func (h *Hub) ringTimeout(callID string) {
 		return
 	}
 
-	// Notify both parties
-	caller := h.getClient(session.CallerID)
-	if caller != nil {
-		caller.SendJSON(MsgCallEnded, CallEndedMsg{CallID: callID, Reason: "timeout"})
-	}
-	callee := h.getClient(session.CalleeID)
-	if callee != nil {
-		callee.SendJSON(MsgCallEnded, CallEndedMsg{CallID: callID, Reason: "timeout"})
-	}
+	// Notify both parties (all devices)
+	h.sendToUser(session.CallerID, MsgCallEnded, CallEndedMsg{CallID: callID, Reason: "timeout"})
+	h.sendToUser(session.CalleeID, MsgCallEnded, CallEndedMsg{CallID: callID, Reason: "timeout"})
 }
 
 func (h *Hub) iceTimeout(callID string) {
@@ -535,15 +669,9 @@ func (h *Hub) iceTimeout(callID string) {
 		return
 	}
 
-	// Notify both parties
-	caller := h.getClient(session.CallerID)
-	if caller != nil {
-		caller.SendJSON(MsgCallEnded, CallEndedMsg{CallID: callID, Reason: "ice_timeout"})
-	}
-	callee := h.getClient(session.CalleeID)
-	if callee != nil {
-		callee.SendJSON(MsgCallEnded, CallEndedMsg{CallID: callID, Reason: "ice_timeout"})
-	}
+	// Notify both parties (all devices)
+	h.sendToUser(session.CallerID, MsgCallEnded, CallEndedMsg{CallID: callID, Reason: "ice_timeout"})
+	h.sendToUser(session.CalleeID, MsgCallEnded, CallEndedMsg{CallID: callID, Reason: "ice_timeout"})
 }
 
 // PromoteToActive transitions a call from CONNECTING to ACTIVE.
@@ -589,17 +717,15 @@ func (h *Hub) startGracePeriod(userID string) bool {
 		return false
 	}
 
-	// Notify peer that this user is reconnecting
+	// Notify peer that this user is reconnecting (all devices)
 	peerID := sess.CallerID
 	if userID == sess.CallerID {
 		peerID = sess.CalleeID
 	}
-	if peer := h.getClient(peerID); peer != nil {
-		peer.SendJSON(MsgPeerReconnecting, PeerReconnectingMsg{
-			CallID: callID,
-			PeerID: userID,
-		})
-	}
+	h.sendToUser(peerID, MsgPeerReconnecting, PeerReconnectingMsg{
+		CallID: callID,
+		PeerID: userID,
+	})
 
 	// Start grace timer
 	graceCtx, graceCancel := context.WithCancel(h.ctx)
@@ -737,13 +863,11 @@ func (h *Hub) reconnectGraceTimeout(graceCtx context.Context, userID, callID, pe
 			})
 		}
 
-		// Notify peer
-		if peer := h.getClient(peerID); peer != nil {
-			peer.SendJSON(MsgCallEnded, CallEndedMsg{
-				CallID: callID,
-				Reason: "reconnect_timeout",
-			})
-		}
+		// Notify peer (all devices)
+		h.sendToUser(peerID, MsgCallEnded, CallEndedMsg{
+			CallID: callID,
+			Reason: "reconnect_timeout",
+		})
 
 		// Clean up rooms
 		h.removeFromAllRooms(userID)
@@ -811,13 +935,11 @@ func (h *Hub) handleReconnect(client *Client, data json.RawMessage) {
 		PeerID: peerID,
 	})
 
-	// Notify peer that the other side reconnected
-	if peer := h.getClient(peerID); peer != nil {
-		peer.SendJSON(MsgPeerReconnected, PeerReconnectedMsg{
-			CallID: msg.CallID,
-			PeerID: client.userID,
-		})
-	}
+	// Notify peer that the other side reconnected (all devices)
+	h.sendToUser(peerID, MsgPeerReconnected, PeerReconnectedMsg{
+		CallID: msg.CallID,
+		PeerID: client.userID,
+	})
 
 	// Flush any buffered ICE candidates to the reconnected client
 	h.flushICEBuffer(msg.CallID, client)
@@ -941,17 +1063,14 @@ func (h *Hub) handleRoomCreate(client *Client, data json.RawMessage) {
 		LiveKitURL:   resp.LiveKitURL,
 	})
 
-	// Send invitations to participants
+	// Send invitations to participants (all devices)
 	for _, inviteeID := range msg.Participants {
-		invitee := h.getClient(inviteeID)
-		if invitee != nil {
-			invitee.SendJSON(MsgRoomInvitation, RoomInvitationMsg{
-				RoomID:       resp.RoomID,
-				InviterID:    client.userID,
-				CallType:     msg.CallType,
-				Participants: msg.Participants,
-			})
-		}
+		h.sendToUser(inviteeID, MsgRoomInvitation, RoomInvitationMsg{
+			RoomID:       resp.RoomID,
+			InviterID:    client.userID,
+			CallType:     msg.CallType,
+			Participants: msg.Participants,
+		})
 		// Push notification for offline users handled by orchestrator event subscriber
 	}
 }
@@ -989,17 +1108,14 @@ func (h *Hub) handleRoomInvite(client *Client, data json.RawMessage) {
 	// Get current participant list for invitation message
 	participants := h.getRoomMembers(msg.RoomID)
 
-	// Send invitations to newly invited users
+	// Send invitations to newly invited users (all devices)
 	for _, inviteeID := range resp.Invited {
-		invitee := h.getClient(inviteeID)
-		if invitee != nil {
-			invitee.SendJSON(MsgRoomInvitation, RoomInvitationMsg{
-				RoomID:       msg.RoomID,
-				InviterID:    client.userID,
-				CallType:     "", // existing room, callee will get type from join
-				Participants: participants,
-			})
-		}
+		h.sendToUser(inviteeID, MsgRoomInvitation, RoomInvitationMsg{
+			RoomID:       msg.RoomID,
+			InviterID:    client.userID,
+			CallType:     "", // existing room, callee will get type from join
+			Participants: participants,
+		})
 	}
 }
 
@@ -1189,13 +1305,176 @@ func (h *Hub) broadcastToRoom(roomID, excludeUserID, msgType string, payload int
 		if uid == excludeUserID {
 			continue
 		}
-		if c := h.getClient(uid); c != nil {
-			c.SendJSON(msgType, payload)
-		}
+		h.sendToUser(uid, msgType, payload)
 	}
 }
 
 func isMaxParticipantsError(err error) bool {
 	return err != nil && (err.Error() == "too many participants" ||
 		err == session.ErrMaxParticipants)
+}
+
+// --- Glare resolution ---
+
+// resolveGlare handles the case where two users call each other simultaneously.
+// Lower user_id wins. The losing call is cancelled.
+func (h *Hub) resolveGlare(ctx context.Context, losingCaller *Client, glareSess *CallSession, initiateMsg CallInitiateMsg) {
+	callerID := losingCaller.userID
+	calleeID := initiateMsg.CalleeID
+
+	// Determine winner: lower user_id wins
+	winnerCallerID := callerID
+	loserCallerID := calleeID
+	winningCallID := "" // will be created
+	losingCallID := glareSess.CallID
+
+	if strings.Compare(callerID, calleeID) > 0 {
+		// calleeID is lower → the existing call (glareSess) wins
+		winnerCallerID = calleeID
+		loserCallerID = callerID
+		winningCallID = glareSess.CallID
+		losingCallID = "" // the new call never gets created
+	} else {
+		// callerID is lower → this new call should win, cancel the existing call
+		winnerCallerID = callerID
+		loserCallerID = calleeID
+		losingCallID = glareSess.CallID
+
+		// End the existing (losing) call
+		if err := h.sessions.End(ctx, glareSess.CallID, "glare"); err != nil {
+			log.Printf("end glare session error: %v", err)
+		}
+
+		// Create the new (winning) call
+		newCallID := uuid.New().String()
+		sess := &CallSession{
+			CallID:    newCallID,
+			CallerID:  callerID,
+			CalleeID:  calleeID,
+			CallType:  initiateMsg.CallType,
+			State:     StateRinging,
+			SDPOffer:  initiateMsg.SDPOffer,
+			StartedAt: time.Now(),
+		}
+		if err := h.sessions.Create(ctx, sess); err != nil {
+			log.Printf("create winning glare session error: %v", err)
+			losingCaller.SendError(ErrCodeInternal, "glare resolution failed", "")
+			return
+		}
+		winningCallID = newCallID
+
+		// Send incoming_call to the callee (all devices)
+		h.sendToUser(calleeID, MsgIncomingCall, IncomingCallMsg{
+			CallID:   newCallID,
+			CallerID: callerID,
+			SDPOffer: initiateMsg.SDPOffer,
+			CallType: initiateMsg.CallType,
+		})
+
+		go h.ringTimeout(newCallID)
+	}
+
+	// If the existing call wins, end nothing (it's already ringing).
+	// But the new call should not be created (we didn't create it above).
+	if winnerCallerID == calleeID {
+		// Existing call wins. Cancel is implicit (new call was never created).
+		// Notify the losing caller (callerID) about glare
+		h.sendToUser(loserCallerID, MsgCallGlare, CallGlareMsg{
+			CancelledCallID: "", // new call was never created
+			WinningCallID:   winningCallID,
+			PeerID:          winnerCallerID,
+		})
+	} else {
+		// New call wins — notify loser (calleeID) that their outgoing call was cancelled
+		h.sendToUser(loserCallerID, MsgCallGlare, CallGlareMsg{
+			CancelledCallID: losingCallID,
+			WinningCallID:   winningCallID,
+			PeerID:          winnerCallerID,
+		})
+	}
+
+	log.Printf("glare resolved: winner=%s (call=%s), loser=%s (call=%s)",
+		winnerCallerID, winningCallID, loserCallerID, losingCallID)
+}
+
+// --- SDP Validation ---
+
+// isValidSDP performs basic validation of an SDP string.
+func isValidSDP(sdp string) bool {
+	if len(sdp) < 10 || len(sdp) > 65536 {
+		return false
+	}
+	// SDP must contain required fields
+	return strings.Contains(sdp, "v=0") && strings.Contains(sdp, "o=")
+}
+
+// --- State Sync ---
+
+// sendStateSync sends the current call state to a newly connected/reconnected client.
+func (h *Hub) sendStateSync(client *Client) {
+	ctx := h.ctx
+	callID, err := h.sessions.GetUserActiveCall(ctx, client.userID)
+	if err != nil || callID == "" {
+		return // no active call
+	}
+
+	sess, err := h.sessions.Get(ctx, callID)
+	if err != nil {
+		return
+	}
+
+	role := "callee"
+	peerID := sess.CallerID
+	if sess.CallerID == client.userID {
+		role = "caller"
+		peerID = sess.CalleeID
+	}
+
+	syncMsg := StateSyncMsg{
+		ActiveCalls: []StateSyncCall{
+			{
+				CallID:   callID,
+				PeerID:   peerID,
+				CallType: sess.CallType,
+				State:    sess.State,
+				Role:     role,
+			},
+		},
+	}
+
+	client.SendJSON(MsgStateSync, syncMsg)
+}
+
+// --- State Recovery ---
+
+// RecoverSessions scans Redis for active sessions on server startup
+// and cleans up orphans (sessions where neither participant is connected).
+func (h *Hub) RecoverSessions() {
+	ctx := h.ctx
+	sessions, err := h.sessions.ScanActiveSessions(ctx)
+	if err != nil {
+		log.Printf("session recovery error: %v", err)
+		return
+	}
+
+	recovered := 0
+	cleaned := 0
+	for _, sess := range sessions {
+		callerOnline := h.isUserOnline(sess.CallerID)
+		calleeOnline := h.isUserOnline(sess.CalleeID)
+
+		if !callerOnline && !calleeOnline {
+			// Orphan — clean up
+			if err := h.sessions.Delete(ctx, sess.CallID); err != nil {
+				log.Printf("cleanup orphan session %s error: %v", sess.CallID, err)
+			}
+			cleaned++
+		} else {
+			recovered++
+		}
+	}
+
+	if recovered > 0 || cleaned > 0 {
+		log.Printf("session recovery: %d recovered, %d orphans cleaned", recovered, cleaned)
+	}
 }

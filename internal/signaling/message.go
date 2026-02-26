@@ -36,6 +36,11 @@ const (
 	MsgPeerReconnecting  = "peer_reconnecting"  // Notify peer that other side is reconnecting
 	MsgPeerReconnected   = "peer_reconnected"   // Notify peer that other side reconnected
 
+	// Glare & multi-device — server → client
+	MsgCallGlare             = "call_glare"              // Simultaneous calls detected, one cancelled
+	MsgCallAcceptedElsewhere = "call_accepted_elsewhere"  // Another device accepted the call
+	MsgStateSync             = "state_sync"               // Current call state sent to reconnecting client
+
 	// Group call — server → client
 	MsgRoomCreated             = "room_created"
 	MsgRoomInvitation          = "room_invitation"
@@ -46,9 +51,12 @@ const (
 )
 
 // Envelope is the base wrapper for all signaling messages.
+// Seq and MsgID support message ordering and deduplication.
 type Envelope struct {
-	Type string          `json:"type"`
-	Data json.RawMessage `json:"data,omitempty"`
+	Type  string          `json:"type"`
+	Data  json.RawMessage `json:"data,omitempty"`
+	Seq   int64           `json:"seq,omitempty"`    // Server-assigned sequence number (server→client only)
+	MsgID string          `json:"msg_id,omitempty"` // Client-assigned message ID for deduplication
 }
 
 // --- Client → Server payloads ---
@@ -228,6 +236,10 @@ const (
 	ErrCodeInvalidState   = "invalid_state"
 	ErrCodeRoomFull       = "room_full"
 	ErrCodeReconnectFailed = "reconnect_failed"
+	ErrCodeGlare           = "glare"         // Simultaneous calls — one was cancelled
+	ErrCodeCallCancelled   = "call_cancelled" // Cancel won the race against accept
+	ErrCodeDuplicate       = "duplicate"      // Duplicate message ID
+	ErrCodeInvalidSDP      = "invalid_sdp"    // SDP validation failed
 )
 
 // --- Reconnection payloads ---
@@ -255,4 +267,34 @@ type PeerReconnectingMsg struct {
 type PeerReconnectedMsg struct {
 	CallID string `json:"call_id"`
 	PeerID string `json:"peer_id"`
+}
+
+// --- Glare & Multi-device payloads ---
+
+// CallGlareMsg notifies the losing caller in a glare scenario.
+// The loser's call is automatically cancelled; they should accept/reject the winning call.
+type CallGlareMsg struct {
+	CancelledCallID string `json:"cancelled_call_id"` // The call that was auto-cancelled
+	WinningCallID   string `json:"winning_call_id"`   // The call that won (lower user_id)
+	PeerID          string `json:"peer_id"`            // The other user
+}
+
+// CallAcceptedElsewhereMsg notifies other devices that one device already accepted.
+type CallAcceptedElsewhereMsg struct {
+	CallID   string `json:"call_id"`
+	DeviceID string `json:"device_id"` // Which device accepted
+}
+
+// StateSyncMsg sends current call state to a reconnecting or newly connected client.
+type StateSyncMsg struct {
+	ActiveCalls []StateSyncCall `json:"active_calls"`
+}
+
+// StateSyncCall is a single active call in a state sync response.
+type StateSyncCall struct {
+	CallID   string    `json:"call_id"`
+	PeerID   string    `json:"peer_id"`
+	CallType string    `json:"call_type"`
+	State    CallState `json:"state"`
+	Role     string    `json:"role"` // "caller" or "callee"
 }
