@@ -1,4 +1,9 @@
 # call-config.yaml
+server:
+  # Allowed WebSocket origins. Empty list allows all (dev mode).
+  # Override via ALLOWED_ORIGINS env var (comma-separated).
+  allowed_origins: []
+
 call:
   ring_timeout_seconds: 45
   ice_timeout_seconds: 15

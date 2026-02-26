@@ -6,35 +6,36 @@ package config
 import (
 	"fmt"
 	"os"
+	"strings"
 
 	"gopkg.in/yaml.v3"
 )
 
 // Config is the root configuration for all services.
 type Config struct {
-	Server     ServerConfig     `yaml:"server"`
-	Auth       AuthConfig       `yaml:"auth"`
-	Call       CallConfig       `yaml:"call"`
-	Quality    QualityConfig    `yaml:"quality"`
-	Group      GroupConfig      `yaml:"group"`
-	Turn       TurnConfig       `yaml:"turn"`
-	RateLimits RateLimitConfig  `yaml:"rate_limits"`
-	LiveKit    LiveKitConfig    `yaml:"livekit"`
-	Push       PushCfg          `yaml:"push"`
-	Orchestrator OrchestratorCfg `yaml:"orchestrator"`
-	Postgres   PostgresConfig   `yaml:"postgres"`
-	Redis      RedisConfig      `yaml:"redis"`
-	NATS       NATSConfig       `yaml:"nats"`
-	ClickHouse ClickHouseConfig `yaml:"clickhouse"`
+	Server       ServerConfig       `yaml:"server"`
+	Auth         AuthConfig         `yaml:"auth"`
+	Call         CallConfig         `yaml:"call"`
+	Quality      QualityConfig      `yaml:"quality"`
+	Group        GroupConfig        `yaml:"group"`
+	Turn         TurnConfig         `yaml:"turn"`
+	RateLimits   RateLimitConfig    `yaml:"rate_limits"`
+	LiveKit      LiveKitConfig      `yaml:"livekit"`
+	Push         PushCfg            `yaml:"push"`
+	Orchestrator OrchestratorCfg    `yaml:"orchestrator"`
+	Postgres     PostgresConfig     `yaml:"postgres"`
+	Redis        RedisConfig        `yaml:"redis"`
+	NATS         NATSConfig         `yaml:"nats"`
+	ClickHouse   ClickHouseConfig   `yaml:"clickhouse"`
 	PolicyEngine PolicyEngineConfig `yaml:"policy_engine"`
 }
 
 // AuthConfig holds JWT authentication settings.
 type AuthConfig struct {
-	JWTSecret             string `yaml:"jwt_secret"`
+	JWTSecret              string `yaml:"jwt_secret"`
 	AccessTokenExpiryMins  int    `yaml:"access_token_expiry_mins"`
 	RefreshTokenExpiryDays int    `yaml:"refresh_token_expiry_days"`
-	TurnSecret            string `yaml:"turn_secret"`
+	TurnSecret             string `yaml:"turn_secret"`
 }
 
 // LiveKitConfig holds LiveKit SFU connection settings.
@@ -46,9 +47,9 @@ type LiveKitConfig struct {
 
 // PushCfg holds push notification gateway settings.
 type PushCfg struct {
-	Port int          `yaml:"port"`
-	APNs APNsCfg      `yaml:"apns"`
-	FCM  FCMCfg       `yaml:"fcm"`
+	Port int     `yaml:"port"`
+	APNs APNsCfg `yaml:"apns"`
+	FCM  FCMCfg  `yaml:"fcm"`
 }
 
 // OrchestratorCfg holds orchestrator HTTP server settings.
@@ -73,8 +74,9 @@ type FCMCfg struct {
 
 // ServerConfig holds common server settings.
 type ServerConfig struct {
-	Port int    `yaml:"port"`
-	Host string `yaml:"host"`
+	Port           int      `yaml:"port"`
+	Host           string   `yaml:"host"`
+	AllowedOrigins []string `yaml:"allowed_origins"`
 }
 
 // CallConfig holds call timing and reconnection parameters.
@@ -88,11 +90,11 @@ type CallConfig struct {
 
 // QualityConfig holds adaptive quality settings.
 type QualityConfig struct {
-	Tiers      QualityTiers      `yaml:"tiers"`
-	Hysteresis HysteresisConfig  `yaml:"hysteresis"`
-	Audio      AudioConfig       `yaml:"audio"`
-	Video      VideoConfig       `yaml:"video"`
-	Bandwidth  BandwidthConfig   `yaml:"bandwidth"`
+	Tiers      QualityTiers     `yaml:"tiers"`
+	Hysteresis HysteresisConfig `yaml:"hysteresis"`
+	Audio      AudioConfig      `yaml:"audio"`
+	Video      VideoConfig      `yaml:"video"`
+	Bandwidth  BandwidthConfig  `yaml:"bandwidth"`
 }
 
 // QualityTiers defines thresholds for network quality classification.
@@ -104,19 +106,19 @@ type QualityTiers struct {
 
 // QualityTier defines threshold values for a single quality tier.
 type QualityTier struct {
-	RTTMaxMs     int     `yaml:"rtt_max_ms,omitempty"`
-	RTTAboveMs   int     `yaml:"rtt_above_ms,omitempty"`
-	LossMaxPct   float64 `yaml:"loss_max_pct,omitempty"`
-	LossAbovePct float64 `yaml:"loss_above_pct,omitempty"`
-	JitterMaxMs  int     `yaml:"jitter_max_ms,omitempty"`
-	JitterAboveMs int    `yaml:"jitter_above_ms,omitempty"`
+	RTTMaxMs      int     `yaml:"rtt_max_ms,omitempty"`
+	RTTAboveMs    int     `yaml:"rtt_above_ms,omitempty"`
+	LossMaxPct    float64 `yaml:"loss_max_pct,omitempty"`
+	LossAbovePct  float64 `yaml:"loss_above_pct,omitempty"`
+	JitterMaxMs   int     `yaml:"jitter_max_ms,omitempty"`
+	JitterAboveMs int     `yaml:"jitter_above_ms,omitempty"`
 }
 
 // HysteresisConfig controls quality tier transition timing.
 type HysteresisConfig struct {
-	UpgradeStableSeconds         int `yaml:"upgrade_stable_seconds"`
-	DowngradeFairSeconds         int `yaml:"downgrade_fair_seconds"`
-	DowngradePoorSeconds         int `yaml:"downgrade_poor_seconds"`
+	UpgradeStableSeconds          int `yaml:"upgrade_stable_seconds"`
+	DowngradeFairSeconds          int `yaml:"downgrade_fair_seconds"`
+	DowngradePoorSeconds          int `yaml:"downgrade_poor_seconds"`
 	MaxCodecChangeIntervalSeconds int `yaml:"max_codec_change_interval_seconds"`
 }
 
@@ -130,28 +132,28 @@ type AudioConfig struct {
 
 // VideoConfig holds video codec and simulcast settings.
 type VideoConfig struct {
-	Codecs                []string `yaml:"codecs"`
-	SimulcastLayers       int      `yaml:"simulcast_layers"`
-	MaxResolution         string   `yaml:"max_resolution"`
-	MaxFramerate          int      `yaml:"max_framerate"`
-	KeyframeIntervalSeconds int    `yaml:"keyframe_interval_seconds"`
+	Codecs                  []string `yaml:"codecs"`
+	SimulcastLayers         int      `yaml:"simulcast_layers"`
+	MaxResolution           string   `yaml:"max_resolution"`
+	MaxFramerate            int      `yaml:"max_framerate"`
+	KeyframeIntervalSeconds int      `yaml:"keyframe_interval_seconds"`
 }
 
 // BandwidthConfig holds bandwidth thresholds for media adaptation.
 type BandwidthConfig struct {
-	AudioOnlyThresholdKbps  int `yaml:"audio_only_threshold_kbps"`
+	AudioOnlyThresholdKbps   int `yaml:"audio_only_threshold_kbps"`
 	VideoResumeThresholdKbps int `yaml:"video_resume_threshold_kbps"`
 	VideoResumeStableSeconds int `yaml:"video_resume_stable_seconds"`
 }
 
 // GroupConfig holds group call settings.
 type GroupConfig struct {
-	MaxParticipants            int `yaml:"max_participants"`
-	ActiveVideoSlots           int `yaml:"active_video_slots"`
-	HQSlots                    int `yaml:"hq_slots"`
-	MQSlots                    int `yaml:"mq_slots"`
+	MaxParticipants             int `yaml:"max_participants"`
+	ActiveVideoSlots            int `yaml:"active_video_slots"`
+	HQSlots                     int `yaml:"hq_slots"`
+	MQSlots                     int `yaml:"mq_slots"`
 	SpeakerDetectionThresholdDB int `yaml:"speaker_detection_threshold_db"`
-	SpeakerHoldSeconds         int `yaml:"speaker_hold_seconds"`
+	SpeakerHoldSeconds          int `yaml:"speaker_hold_seconds"`
 }
 
 // TurnConfig holds TURN server settings.
@@ -166,11 +168,11 @@ type TurnConfig struct {
 
 // RateLimitConfig holds rate limiting settings.
 type RateLimitConfig struct {
-	CallInitiatePerUser             string `yaml:"call_initiate_per_user"`
-	CallInitiateGlobalCPS           int    `yaml:"call_initiate_global_cps"`
-	SignalingMessagesPerConnection   string `yaml:"signaling_messages_per_connection"`
-	TurnAllocationsPerUser          string `yaml:"turn_allocations_per_user"`
-	APIRequestsPerUser              string `yaml:"api_requests_per_user"`
+	CallInitiatePerUser            string `yaml:"call_initiate_per_user"`
+	CallInitiateGlobalCPS          int    `yaml:"call_initiate_global_cps"`
+	SignalingMessagesPerConnection string `yaml:"signaling_messages_per_connection"`
+	TurnAllocationsPerUser         string `yaml:"turn_allocations_per_user"`
+	APIRequestsPerUser             string `yaml:"api_requests_per_user"`
 }
 
 // PostgresConfig holds PostgreSQL connection settings.
@@ -393,4 +395,22 @@ func (c *Config) applyEnvOverrides() {
 	if v := os.Getenv("ORCHESTRATOR_PORT"); v != "" {
 		fmt.Sscanf(v, "%d", &c.Orchestrator.Port)
 	}
+	if v := os.Getenv("ALLOWED_ORIGINS"); v != "" {
+		origins := splitCSV(v)
+		if len(origins) > 0 {
+			c.Server.AllowedOrigins = origins
+		}
+	}
+}
+
+// splitCSV splits a comma-separated string into trimmed, non-empty values.
+func splitCSV(s string) []string {
+	var result []string
+	for _, part := range strings.Split(s, ",") {
+		v := strings.TrimSpace(part)
+		if v != "" {
+			result = append(result, v)
+		}
+	}
+	return result
 }

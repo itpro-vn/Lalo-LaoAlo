@@ -27,7 +27,7 @@ type Server struct {
 func NewServer(cfg *config.Config, rdb *redis.Client, bus *events.Bus, jwtService *auth.JWTService, orch *session.Orchestrator) *Server {
 	sessions := NewSessionStore(rdb)
 	hub := NewHub(sessions, bus, cfg, orch)
-	handler := NewHandler(hub, jwtService)
+	handler := NewHandler(hub, jwtService, cfg.Server.AllowedOrigins)
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/ws", handler.ServeWS)

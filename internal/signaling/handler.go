@@ -8,27 +8,42 @@ import (
 	"github.com/minhgv/lalo/internal/auth"
 )
 
-var upgrader = websocket.Upgrader{
-	ReadBufferSize:  1024,
-	WriteBufferSize: 1024,
-	CheckOrigin: func(r *http.Request) bool {
-		// TODO: restrict origins in production
-		return true
-	},
-}
-
 // Handler handles WebSocket upgrade and JWT authentication.
 type Handler struct {
 	hub        *Hub
 	jwtService *auth.JWTService
+	upgrader   websocket.Upgrader
 }
 
 // NewHandler creates a new signaling handler.
-func NewHandler(hub *Hub, jwtService *auth.JWTService) *Handler {
-	return &Handler{
+// allowedOrigins restricts WebSocket connections to the given origins.
+// An empty list allows all origins (dev mode).
+func NewHandler(hub *Hub, jwtService *auth.JWTService, allowedOrigins []string) *Handler {
+	h := &Handler{
 		hub:        hub,
 		jwtService: jwtService,
+		upgrader: websocket.Upgrader{
+			ReadBufferSize:  1024,
+			WriteBufferSize: 1024,
+		},
 	}
+
+	if len(allowedOrigins) > 0 {
+		allowed := make(map[string]bool, len(allowedOrigins))
+		for _, o := range allowedOrigins {
+			allowed[o] = true
+		}
+		h.upgrader.CheckOrigin = func(r *http.Request) bool {
+			origin := r.Header.Get("Origin")
+			return allowed[origin]
+		}
+	} else {
+		h.upgrader.CheckOrigin = func(r *http.Request) bool {
+			return true
+		}
+	}
+
+	return h
 }
 
 // ServeWS handles WebSocket upgrade requests.
@@ -60,7 +75,7 @@ func (h *Handler) ServeWS(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Upgrade to WebSocket
-	conn, err := upgrader.Upgrade(w, r, nil)
+	conn, err := h.upgrader.Upgrade(w, r, nil)
 	if err != nil {
 		log.Printf("ws upgrade error: %v", err)
 		return

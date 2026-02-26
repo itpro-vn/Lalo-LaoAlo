@@ -18,5 +18,10 @@ vendor/
 .env
 .env.local
 
+# Android signing
+key.properties
+*.jks
+*.keystore
+
 # OS
 Thumbs.db
