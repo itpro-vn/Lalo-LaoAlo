@@ -234,3 +234,121 @@ func (s *Store) Delete(ctx context.Context, callID string) error {
 	_, err = pipe.Exec(ctx)
 	return err
 }
+
+// UpdateParticipantRole changes a participant's role in a session.
+// Uses optimistic locking to prevent concurrent modification.
+func (s *Store) UpdateParticipantRole(ctx context.Context, callID, userID string, newRole Role) error {
+	key := models.SessionKey(callID)
+
+	// Optimistic retry loop
+	for i := 0; i < 3; i++ {
+		err := s.rdb.Watch(ctx, func(tx *redis.Tx) error {
+			data, err := tx.Get(ctx, key).Bytes()
+			if err == redis.Nil {
+				return ErrSessionNotFound
+			}
+			if err != nil {
+				return err
+			}
+
+			var sess Session
+			if err := json.Unmarshal(data, &sess); err != nil {
+				return fmt.Errorf("unmarshal session: %w", err)
+			}
+
+			found := false
+			for i := range sess.Participants {
+				if sess.Participants[i].UserID == userID {
+					sess.Participants[i].Role = newRole
+					found = true
+					break
+				}
+			}
+			if !found {
+				return fmt.Errorf("participant %s not found in session %s", userID, callID)
+			}
+
+			updated, err := json.Marshal(sess)
+			if err != nil {
+				return fmt.Errorf("marshal session: %w", err)
+			}
+
+			_, err = tx.TxPipelined(ctx, func(pipe redis.Pipeliner) error {
+				pipe.Set(ctx, key, updated, 24*time.Hour)
+				return nil
+			})
+			return err
+		}, key)
+
+		if err == redis.TxFailedErr {
+			continue // Retry on optimistic lock failure
+		}
+		return err
+	}
+
+	return fmt.Errorf("UpdateParticipantRole: optimistic lock failed after 3 retries")
+}
+
+// UpdateInitiator changes the initiator_id of a session (host transfer).
+func (s *Store) UpdateInitiator(ctx context.Context, callID, newInitiatorID string) error {
+	key := models.SessionKey(callID)
+
+	for i := 0; i < 3; i++ {
+		err := s.rdb.Watch(ctx, func(tx *redis.Tx) error {
+			data, err := tx.Get(ctx, key).Bytes()
+			if err == redis.Nil {
+				return ErrSessionNotFound
+			}
+			if err != nil {
+				return err
+			}
+
+			var sess Session
+			if err := json.Unmarshal(data, &sess); err != nil {
+				return fmt.Errorf("unmarshal session: %w", err)
+			}
+
+			sess.InitiatorID = newInitiatorID
+
+			updated, err := json.Marshal(sess)
+			if err != nil {
+				return fmt.Errorf("marshal session: %w", err)
+			}
+
+			_, err = tx.TxPipelined(ctx, func(pipe redis.Pipeliner) error {
+				pipe.Set(ctx, key, updated, 24*time.Hour)
+				return nil
+			})
+			return err
+		}, key)
+
+		if err == redis.TxFailedErr {
+			continue
+		}
+		return err
+	}
+
+	return fmt.Errorf("UpdateInitiator: optimistic lock failed after 3 retries")
+}
+
+// ScanGroupSessions scans Redis for active group sessions.
+func (s *Store) ScanGroupSessions(ctx context.Context) ([]Session, error) {
+	var sessions []Session
+	iter := s.rdb.Scan(ctx, 0, models.SessionKey("*"), 100).Iterator()
+
+	for iter.Next(ctx) {
+		data, err := s.rdb.Get(ctx, iter.Val()).Bytes()
+		if err != nil {
+			continue
+		}
+		var sess Session
+		if err := json.Unmarshal(data, &sess); err != nil {
+			continue
+		}
+		if sess.CallType == "group" && sess.EndedAt.IsZero() {
+			sessions = append(sessions, sess)
+		}
+	}
+
+	return sessions, iter.Err()
+}

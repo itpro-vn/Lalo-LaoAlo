@@ -15,10 +15,12 @@ const (
 	MsgReconnect      = "reconnect" // Client reconnecting to active session
 
 	// Group call — client → server
-	MsgRoomCreate = "room_create"
-	MsgRoomInvite = "room_invite"
-	MsgRoomJoin   = "room_join"
-	MsgRoomLeave  = "room_leave"
+	MsgRoomCreate  = "room_create"
+	MsgRoomInvite  = "room_invite"
+	MsgRoomJoin    = "room_join"
+	MsgRoomLeave   = "room_leave"
+	MsgRoomEndAll  = "room_end_all" // Host ends the room for all participants
+	MsgMediaChange = "media_change" // Participant updates their media state
 )
 
 // Server → Client message types.
@@ -32,14 +34,14 @@ const (
 	MsgPong          = "pong"
 
 	// Reconnection — server → client
-	MsgSessionResumed    = "session_resumed"    // Session successfully recovered
-	MsgPeerReconnecting  = "peer_reconnecting"  // Notify peer that other side is reconnecting
-	MsgPeerReconnected   = "peer_reconnected"   // Notify peer that other side reconnected
+	MsgSessionResumed   = "session_resumed"   // Session successfully recovered
+	MsgPeerReconnecting = "peer_reconnecting" // Notify peer that other side is reconnecting
+	MsgPeerReconnected  = "peer_reconnected"  // Notify peer that other side reconnected
 
 	// Glare & multi-device — server → client
 	MsgCallGlare             = "call_glare"              // Simultaneous calls detected, one cancelled
-	MsgCallAcceptedElsewhere = "call_accepted_elsewhere"  // Another device accepted the call
-	MsgStateSync             = "state_sync"               // Current call state sent to reconnecting client
+	MsgCallAcceptedElsewhere = "call_accepted_elsewhere" // Another device accepted the call
+	MsgStateSync             = "state_sync"              // Current call state sent to reconnecting client
 
 	// Group call — server → client
 	MsgRoomCreated             = "room_created"
@@ -139,21 +141,21 @@ type ErrorMsg struct {
 
 // QualityMetricsMsg is sent by clients with batched QoS samples.
 type QualityMetricsMsg struct {
-	CallID  string               `json:"call_id"`
+	CallID  string                `json:"call_id"`
 	Samples []QualityMetricSample `json:"samples"`
 }
 
 // QualityMetricSample is a single client-reported QoS measurement.
 type QualityMetricSample struct {
-	Timestamp   int64   `json:"ts"`            // unix millis
-	Direction   string  `json:"direction"`     // "send" or "recv"
+	Timestamp   int64   `json:"ts"`        // unix millis
+	Direction   string  `json:"direction"` // "send" or "recv"
 	RTTMs       int     `json:"rtt_ms"`
 	LossPct     float64 `json:"loss_pct"`
 	JitterMs    float64 `json:"jitter_ms"`
 	BitrateKbps int     `json:"bitrate_kbps"`
 	Framerate   int     `json:"framerate"`
-	Resolution  string  `json:"resolution"`    // "1280x720"
-	NetworkTier string  `json:"network_tier"`  // "good", "fair", "poor"
+	Resolution  string  `json:"resolution"`   // "1280x720"
+	NetworkTier string  `json:"network_tier"` // "good", "fair", "poor"
 }
 
 // --- Group call — Client → Server payloads ---
@@ -180,6 +182,18 @@ type RoomLeaveMsg struct {
 	RoomID string `json:"room_id"`
 }
 
+// RoomEndAllMsg is sent by the host to end the room for all participants.
+type RoomEndAllMsg struct {
+	RoomID string `json:"room_id"`
+}
+
+// MediaChangeMsg is sent by a participant to update their media state.
+type MediaChangeMsg struct {
+	RoomID string `json:"room_id"`
+	Audio  bool   `json:"audio"`
+	Video  bool   `json:"video"`
+}
+
 // --- Group call — Server → Client payloads ---
 
 // RoomCreatedMsg notifies the initiator that the room was created.
@@ -191,9 +205,9 @@ type RoomCreatedMsg struct {
 
 // RoomInvitationMsg notifies an invitee of a group call invitation.
 type RoomInvitationMsg struct {
-	RoomID     string   `json:"room_id"`
-	InviterID  string   `json:"inviter_id"`
-	CallType   string   `json:"call_type"`
+	RoomID       string   `json:"room_id"`
+	InviterID    string   `json:"inviter_id"`
+	CallType     string   `json:"call_type"`
 	Participants []string `json:"participants"` // current participant IDs
 }
 
@@ -226,17 +240,17 @@ type ParticipantMediaChangedMsg struct {
 
 // Error codes.
 const (
-	ErrCodeInvalidMessage = "invalid_message"
-	ErrCodeUnauthorized   = "unauthorized"
-	ErrCodeNotFound       = "not_found"
-	ErrCodeBusy           = "busy"
-	ErrCodeTimeout        = "timeout"
-	ErrCodeRateLimit      = "rate_limited"
-	ErrCodeInternal       = "internal_error"
-	ErrCodeInvalidState   = "invalid_state"
-	ErrCodeRoomFull       = "room_full"
+	ErrCodeInvalidMessage  = "invalid_message"
+	ErrCodeUnauthorized    = "unauthorized"
+	ErrCodeNotFound        = "not_found"
+	ErrCodeBusy            = "busy"
+	ErrCodeTimeout         = "timeout"
+	ErrCodeRateLimit       = "rate_limited"
+	ErrCodeInternal        = "internal_error"
+	ErrCodeInvalidState    = "invalid_state"
+	ErrCodeRoomFull        = "room_full"
 	ErrCodeReconnectFailed = "reconnect_failed"
-	ErrCodeGlare           = "glare"         // Simultaneous calls — one was cancelled
+	ErrCodeGlare           = "glare"          // Simultaneous calls — one was cancelled
 	ErrCodeCallCancelled   = "call_cancelled" // Cancel won the race against accept
 	ErrCodeDuplicate       = "duplicate"      // Duplicate message ID
 	ErrCodeInvalidSDP      = "invalid_sdp"    // SDP validation failed
@@ -276,7 +290,7 @@ type PeerReconnectedMsg struct {
 type CallGlareMsg struct {
 	CancelledCallID string `json:"cancelled_call_id"` // The call that was auto-cancelled
 	WinningCallID   string `json:"winning_call_id"`   // The call that won (lower user_id)
-	PeerID          string `json:"peer_id"`            // The other user
+	PeerID          string `json:"peer_id"`           // The other user
 }
 
 // CallAcceptedElsewhereMsg notifies other devices that one device already accepted.

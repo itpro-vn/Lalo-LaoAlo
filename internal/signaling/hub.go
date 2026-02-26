@@ -3,6 +3,7 @@ package signaling
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"log"
 	"strings"
 	"sync"
@@ -295,6 +296,10 @@ func (h *Hub) handleMessage(msg *ClientMessage) {
 		h.handleRoomJoin(msg.client, env.Data)
 	case MsgRoomLeave:
 		h.handleRoomLeave(msg.client, env.Data)
+	case MsgRoomEndAll:
+		h.handleRoomEndAll(msg.client, env.Data)
+	case MsgMediaChange:
+		h.handleMediaChange(msg.client, env.Data)
 	default:
 		msg.client.SendError(ErrCodeInvalidMessage, "unknown message type: "+env.Type, "")
 	}
@@ -1038,6 +1043,14 @@ func (h *Hub) handleRoomCreate(client *Client, data json.RawMessage) {
 		return
 	}
 
+	// Rate limit room creation: max 5 rooms per minute per user
+	if limited, err := h.sessions.CheckRateLimit(h.ctx, "room_create:"+client.userID, 5, 60); err != nil {
+		log.Printf("[hub] rate limit check error: %v", err)
+	} else if limited {
+		client.SendError(ErrCodeRateLimit, "room creation rate limited", "")
+		return
+	}
+
 	resp, err := h.orchestrator.CreateGroupSession(h.ctx, session.CreateGroupRequest{
 		InitiatorID:  client.userID,
 		Participants: msg.Participants,
@@ -1047,14 +1060,17 @@ func (h *Hub) handleRoomCreate(client *Client, data json.RawMessage) {
 		log.Printf("[hub] room create error: %v", err)
 		if isMaxParticipantsError(err) {
 			client.SendError(ErrCodeRoomFull, err.Error(), "")
+		} else if isUserBusyError(err) {
+			client.SendError(ErrCodeBusy, "already in a call", "")
 		} else {
 			client.SendError(ErrCodeInternal, "failed to create room", "")
 		}
 		return
 	}
 
-	// Track room membership locally
+	// Track room membership and host locally
 	h.addToRoom(resp.RoomID, client.userID)
+	h.setRoomHost(resp.RoomID, client.userID)
 
 	// Notify creator
 	client.SendJSON(MsgRoomCreated, RoomCreatedMsg{
@@ -1164,6 +1180,8 @@ func (h *Hub) handleRoomJoin(client *Client, data json.RawMessage) {
 		log.Printf("[hub] room join error: %v", err)
 		if isMaxParticipantsError(err) {
 			client.SendError(ErrCodeRoomFull, err.Error(), msg.RoomID)
+		} else if isUserBusyError(err) {
+			client.SendError(ErrCodeBusy, "already in a call", msg.RoomID)
 		} else {
 			client.SendError(ErrCodeInternal, err.Error(), msg.RoomID)
 		}
@@ -1210,12 +1228,34 @@ func (h *Hub) handleRoomLeave(client *Client, data json.RawMessage) {
 		return
 	}
 
+	// Check if leaving user is the host — if so, attempt host transfer
+	isHost := h.isRoomHost(msg.RoomID, client.userID)
+
 	if err := h.orchestrator.LeaveGroupSession(h.ctx, msg.RoomID, client.userID); err != nil {
 		log.Printf("[hub] room leave error: %v", err)
 	}
 
 	// Remove from local tracking
 	h.removeFromRoom(msg.RoomID, client.userID)
+
+	// Get remaining members
+	members := h.getRoomMembers(msg.RoomID)
+
+	if isHost && len(members) > 0 {
+		// Host transfer: promote the first remaining member to host
+		newHostID := members[0]
+		if err := h.orchestrator.TransferHost(h.ctx, msg.RoomID, newHostID); err != nil {
+			log.Printf("[hub] host transfer error: %v", err)
+		} else {
+			// Notify all remaining members about host change
+			h.broadcastToRoom(msg.RoomID, "", MsgParticipantJoined, ParticipantJoinedMsg{
+				RoomID: msg.RoomID,
+				UserID: newHostID,
+				Role:   "host",
+			})
+			log.Printf("[hub] host transferred from %s to %s in room %s", client.userID, newHostID, msg.RoomID)
+		}
+	}
 
 	// Broadcast participant_left to remaining members
 	h.broadcastToRoom(msg.RoomID, "", MsgParticipantLeft, ParticipantLeftMsg{
@@ -1224,15 +1264,120 @@ func (h *Hub) handleRoomLeave(client *Client, data json.RawMessage) {
 	})
 
 	// If room is empty, clean up local tracking
-	members := h.getRoomMembers(msg.RoomID)
 	if len(members) == 0 {
 		h.roomsMu.Lock()
 		delete(h.rooms, msg.RoomID)
 		h.roomsMu.Unlock()
+		h.clearRoomHost(msg.RoomID)
 	}
 }
 
+// handleRoomEndAll handles a host request to end the room for all participants.
+func (h *Hub) handleRoomEndAll(client *Client, data json.RawMessage) {
+	if h.orchestrator == nil {
+		client.SendError(ErrCodeInternal, "group calls not available", "")
+		return
+	}
+
+	var msg RoomEndAllMsg
+	if err := json.Unmarshal(data, &msg); err != nil {
+		client.SendError(ErrCodeInvalidMessage, "invalid room_end_all payload", "")
+		return
+	}
+
+	if msg.RoomID == "" {
+		client.SendError(ErrCodeInvalidMessage, "room_id required", "")
+		return
+	}
+
+	// Verify the sender is in the room
+	if !h.isInRoom(msg.RoomID, client.userID) {
+		client.SendError(ErrCodeNotFound, "not in room", msg.RoomID)
+		return
+	}
+
+	// Verify the sender is the host
+	if !h.isRoomHost(msg.RoomID, client.userID) {
+		client.SendError(ErrCodeUnauthorized, "only the host can end the room for all", msg.RoomID)
+		return
+	}
+
+	// Get all members before closing
+	members := h.getRoomMembers(msg.RoomID)
+
+	// Close the room via orchestrator (generates CDR, publishes events)
+	if err := h.orchestrator.CloseRoom(h.ctx, msg.RoomID, "host_ended"); err != nil {
+		log.Printf("[hub] room end_all error: %v", err)
+		client.SendError(ErrCodeInternal, "failed to end room", msg.RoomID)
+		return
+	}
+
+	// Notify all members that the room is closed
+	for _, uid := range members {
+		h.sendToUser(uid, MsgRoomClosed, RoomClosedMsg{
+			RoomID: msg.RoomID,
+			Reason: "host_ended",
+		})
+	}
+
+	// Clean up local room tracking
+	h.roomsMu.Lock()
+	delete(h.rooms, msg.RoomID)
+	h.roomsMu.Unlock()
+	h.clearRoomHost(msg.RoomID)
+
+	log.Printf("[hub] room %s ended by host %s for all participants", msg.RoomID, client.userID)
+}
+
+// handleMediaChange handles a participant changing their media state.
+func (h *Hub) handleMediaChange(client *Client, data json.RawMessage) {
+	if h.orchestrator == nil {
+		client.SendError(ErrCodeInternal, "group calls not available", "")
+		return
+	}
+
+	var msg MediaChangeMsg
+	if err := json.Unmarshal(data, &msg); err != nil {
+		client.SendError(ErrCodeInvalidMessage, "invalid media_change payload", "")
+		return
+	}
+
+	if msg.RoomID == "" {
+		client.SendError(ErrCodeInvalidMessage, "room_id required", "")
+		return
+	}
+
+	if !h.isInRoom(msg.RoomID, client.userID) {
+		client.SendError(ErrCodeNotFound, "not in room", msg.RoomID)
+		return
+	}
+
+	// Update media state via orchestrator
+	if err := h.orchestrator.UpdateMediaState(h.ctx, msg.RoomID, client.userID, session.MediaState{
+		AudioEnabled: msg.Audio,
+		VideoEnabled: msg.Video,
+	}); err != nil {
+		log.Printf("[hub] media change error: %v", err)
+		// Don't fail the broadcast even if store update fails
+	}
+
+	// Broadcast media change to all room members except sender
+	h.broadcastToRoom(msg.RoomID, client.userID, MsgParticipantMediaChanged, ParticipantMediaChangedMsg{
+		RoomID: msg.RoomID,
+		UserID: client.userID,
+		Audio:  msg.Audio,
+		Video:  msg.Video,
+	})
+}
+
 // --- Room membership helpers ---
+
+// roomHosts tracks which user is the host of each room: roomID → userID.
+// The hub maintains this locally for quick lookups.
+var roomHosts = struct {
+	sync.RWMutex
+	m map[string]string
+}{m: make(map[string]string)}
 
 func (h *Hub) addToRoom(roomID, userID string) {
 	h.roomsMu.Lock()
@@ -1241,6 +1386,28 @@ func (h *Hub) addToRoom(roomID, userID string) {
 		h.rooms[roomID] = make(map[string]bool)
 	}
 	h.rooms[roomID][userID] = true
+}
+
+func (h *Hub) setRoomHost(roomID, userID string) {
+	roomHosts.Lock()
+	roomHosts.m[roomID] = userID
+	roomHosts.Unlock()
+}
+
+func (h *Hub) getRoomHost(roomID string) string {
+	roomHosts.RLock()
+	defer roomHosts.RUnlock()
+	return roomHosts.m[roomID]
+}
+
+func (h *Hub) isRoomHost(roomID, userID string) bool {
+	return h.getRoomHost(roomID) == userID
+}
+
+func (h *Hub) clearRoomHost(roomID string) {
+	roomHosts.Lock()
+	delete(roomHosts.m, roomID)
+	roomHosts.Unlock()
 }
 
 func (h *Hub) removeFromRoom(roomID, userID string) {
@@ -1277,6 +1444,7 @@ func (h *Hub) removeFromAllRooms(userID string) {
 			roomsToLeave = append(roomsToLeave, roomID)
 			if len(members) == 0 {
 				delete(h.rooms, roomID)
+				h.clearRoomHost(roomID)
 			}
 		}
 	}
@@ -1312,6 +1480,11 @@ func (h *Hub) broadcastToRoom(roomID, excludeUserID, msgType string, payload int
 func isMaxParticipantsError(err error) bool {
 	return err != nil && (err.Error() == "too many participants" ||
 		err == session.ErrMaxParticipants)
+}
+
+func isUserBusyError(err error) bool {
+	return err != nil && (errors.Is(err, session.ErrUserBusy) ||
+		strings.Contains(err.Error(), "user already in active call"))
 }
 
 // --- Glare resolution ---
@@ -1451,6 +1624,8 @@ func (h *Hub) sendStateSync(client *Client) {
 // and cleans up orphans (sessions where neither participant is connected).
 func (h *Hub) RecoverSessions() {
 	ctx := h.ctx
+
+	// Recover 1:1 call sessions
 	sessions, err := h.sessions.ScanActiveSessions(ctx)
 	if err != nil {
 		log.Printf("session recovery error: %v", err)
@@ -1476,5 +1651,57 @@ func (h *Hub) RecoverSessions() {
 
 	if recovered > 0 || cleaned > 0 {
 		log.Printf("session recovery: %d recovered, %d orphans cleaned", recovered, cleaned)
+	}
+
+	// Recover group room sessions
+	if h.orchestrator == nil {
+		return
+	}
+
+	groupSessions, err := h.orchestrator.RecoverGroupSessions(ctx)
+	if err != nil {
+		log.Printf("group session recovery error: %v", err)
+		return
+	}
+
+	roomRecovered := 0
+	roomCleaned := 0
+	for _, sess := range groupSessions {
+		activeParticipants := sess.ActiveParticipants()
+
+		if len(activeParticipants) == 0 {
+			// No active participants — orphaned room, clean up
+			if err := h.orchestrator.CloseRoom(ctx, sess.CallID, "orphan_cleanup"); err != nil {
+				log.Printf("cleanup orphan room %s error: %v", sess.CallID, err)
+			}
+			roomCleaned++
+			continue
+		}
+
+		// Rebuild local room membership
+		hasOnlineParticipant := false
+		for _, p := range activeParticipants {
+			if h.isUserOnline(p.UserID) {
+				h.addToRoom(sess.CallID, p.UserID)
+				hasOnlineParticipant = true
+			}
+		}
+
+		// Track the host
+		if sess.InitiatorID != "" {
+			h.setRoomHost(sess.CallID, sess.InitiatorID)
+		}
+
+		if hasOnlineParticipant {
+			roomRecovered++
+		} else {
+			// All participants offline — start grace timer
+			roomRecovered++
+			log.Printf("room %s recovered but no participants online, waiting for reconnect", sess.CallID)
+		}
+	}
+
+	if roomRecovered > 0 || roomCleaned > 0 {
+		log.Printf("room recovery: %d recovered, %d orphans cleaned", roomRecovered, roomCleaned)
 	}
 }

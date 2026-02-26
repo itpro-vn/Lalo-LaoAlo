@@ -437,7 +437,7 @@ func (h *Handler) handleLeaveRoom(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) handleEndRoom(w http.ResponseWriter, r *http.Request) {
-	_, ok := auth.ClaimsFromContext(r.Context())
+	claims, ok := auth.ClaimsFromContext(r.Context())
 	if !ok {
 		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "unauthorized"})
 		return
@@ -449,8 +449,13 @@ func (h *Handler) handleEndRoom(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := h.orchestrator.CloseRoom(r.Context(), roomID, "host_ended"); err != nil {
+	// Use EndRoomForAll which verifies the caller is the host
+	if err := h.orchestrator.EndRoomForAll(r.Context(), roomID, claims.UserID); err != nil {
 		log.Printf("end room error: %v", err)
+		if err.Error() == "only the host can end the room for all" {
+			writeJSON(w, http.StatusForbidden, map[string]string{"error": err.Error()})
+			return
+		}
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return
 	}

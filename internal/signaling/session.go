@@ -17,17 +17,17 @@ type SessionStore struct {
 
 // CallSession represents a call session stored in Redis.
 type CallSession struct {
-	CallID      string    `json:"call_id"`
-	CallerID    string    `json:"caller_id"`
-	CalleeID    string    `json:"callee_id"`
-	CallType    string    `json:"call_type"`
-	State       CallState `json:"state"`
-	SDPOffer    string    `json:"sdp_offer,omitempty"`
-	SDPAnswer   string    `json:"sdp_answer,omitempty"`
-	StartedAt   time.Time `json:"started_at"`
-	AnsweredAt  time.Time `json:"answered_at,omitempty"`
-	EndedAt     time.Time `json:"ended_at,omitempty"`
-	EndReason   string    `json:"end_reason,omitempty"`
+	CallID     string    `json:"call_id"`
+	CallerID   string    `json:"caller_id"`
+	CalleeID   string    `json:"callee_id"`
+	CallType   string    `json:"call_type"`
+	State      CallState `json:"state"`
+	SDPOffer   string    `json:"sdp_offer,omitempty"`
+	SDPAnswer  string    `json:"sdp_answer,omitempty"`
+	StartedAt  time.Time `json:"started_at"`
+	AnsweredAt time.Time `json:"answered_at,omitempty"`
+	EndedAt    time.Time `json:"ended_at,omitempty"`
+	EndReason  string    `json:"end_reason,omitempty"`
 }
 
 var (
@@ -284,4 +284,21 @@ func (s *SessionStore) Delete(ctx context.Context, callID string) error {
 	pipe.Del(ctx, userActiveCallKey(session.CalleeID))
 	_, err = pipe.Exec(ctx)
 	return err
+}
+
+// CheckRateLimit checks if a rate limit has been exceeded for the given key.
+// It uses a Redis INCR + EXPIRE pattern. Returns true if rate limited.
+func (s *SessionStore) CheckRateLimit(ctx context.Context, key string, maxCount int64, windowSecs int) (bool, error) {
+	fullKey := "ratelimit:" + key
+	count, err := s.rdb.Incr(ctx, fullKey).Result()
+	if err != nil {
+		return false, fmt.Errorf("rate limit incr: %w", err)
+	}
+
+	// Set expiry on first increment
+	if count == 1 {
+		s.rdb.Expire(ctx, fullKey, time.Duration(windowSecs)*time.Second)
+	}
+
+	return count > maxCount, nil
 }

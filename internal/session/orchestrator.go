@@ -17,12 +17,12 @@ import (
 // Orchestrator manages call session lifecycle, topology decisions,
 // participant management, and CDR generation.
 type Orchestrator struct {
-	store     *Store
-	bus       *events.Bus
-	cdr       *CDRWriter
-	turnSvc   *auth.TurnService
-	lkSvc     *auth.LiveKitTokenService
-	cfg       *config.Config
+	store   *Store
+	bus     *events.Bus
+	cdr     *CDRWriter
+	turnSvc *auth.TurnService
+	lkSvc   *auth.LiveKitTokenService
+	cfg     *config.Config
 }
 
 // NewOrchestrator creates a new session orchestrator.
@@ -336,4 +336,10 @@ func (o *Orchestrator) FallbackToTURN(ctx context.Context, callID string) (*auth
 // GetTurnCredentials generates TURN credentials for a participant.
 func (o *Orchestrator) GetTurnCredentials(ctx context.Context, userID string) *auth.TurnCredentials {
 	return o.turnSvc.GenerateCredentials(userID)
+}
+
+// RecoverGroupSessions returns all active group sessions from Redis.
+// Used by the signaling hub to rebuild local room state after restart.
+func (o *Orchestrator) RecoverGroupSessions(ctx context.Context) ([]Session, error) {
+	return o.store.ScanGroupSessions(ctx)
 }

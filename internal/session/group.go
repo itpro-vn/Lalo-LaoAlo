@@ -21,11 +21,11 @@ type CreateGroupRequest struct {
 
 // CreateGroupResponse holds the result of group room creation.
 type CreateGroupResponse struct {
-	RoomID       string                `json:"room_id"`
-	Topology     Topology              `json:"topology"`
-	LiveKitToken string                `json:"livekit_token"`
-	LiveKitURL   string                `json:"livekit_url"`
-	Participants []string              `json:"participants"` // invited user IDs
+	RoomID          string                `json:"room_id"`
+	Topology        Topology              `json:"topology"`
+	LiveKitToken    string                `json:"livekit_token"`
+	LiveKitURL      string                `json:"livekit_url"`
+	Participants    []string              `json:"participants"` // invited user IDs
 	TurnCredentials *auth.TurnCredentials `json:"turn_credentials,omitempty"`
 }
 
@@ -231,12 +231,13 @@ func (o *Orchestrator) InviteToRoom(ctx context.Context, roomID, inviterID strin
 		return nil, fmt.Errorf("session %s is not a group call", roomID)
 	}
 
-	// Only host (initiator) or callers can invite
-	if err := CheckPermission(RoleCaller, PermInvite); err != nil {
-		inviter := sess.FindParticipant(inviterID)
-		if inviter == nil || inviter.Role != RoleCaller {
-			return nil, fmt.Errorf("only the host can invite participants")
-		}
+	// Verify inviter is the host (initiator / RoleCaller)
+	inviter := sess.FindParticipant(inviterID)
+	if inviter == nil || inviter.LeftAt.IsZero() == false {
+		return nil, fmt.Errorf("inviter %s is not an active participant", inviterID)
+	}
+	if inviter.Role != RoleCaller {
+		return nil, fmt.Errorf("only the host can invite participants")
 	}
 
 	maxP := o.cfg.Group.MaxParticipants
@@ -308,4 +309,56 @@ func (o *Orchestrator) GetRoomParticipants(ctx context.Context, roomID string) (
 		return nil, err
 	}
 	return sess.ActiveParticipants(), nil
+}
+
+// TransferHost changes the host of a group call room to a new user.
+// The new host must be an active participant in the room.
+func (o *Orchestrator) TransferHost(ctx context.Context, roomID, newHostID string) error {
+	sess, err := o.store.Get(ctx, roomID)
+	if err != nil {
+		return fmt.Errorf("room not found: %w", err)
+	}
+
+	if sess.CallType != "group" {
+		return fmt.Errorf("session %s is not a group call", roomID)
+	}
+
+	newHost := sess.FindParticipant(newHostID)
+	if newHost == nil || !newHost.LeftAt.IsZero() {
+		return fmt.Errorf("user %s is not an active participant", newHostID)
+	}
+
+	// Update the participant role to caller (host)
+	if err := o.store.UpdateParticipantRole(ctx, roomID, newHostID, RoleCaller); err != nil {
+		return fmt.Errorf("transfer host: %w", err)
+	}
+
+	// Update initiator ID to reflect new host
+	if err := o.store.UpdateInitiator(ctx, roomID, newHostID); err != nil {
+		log.Printf("[group] failed to update initiator for room %s: %v", roomID, err)
+	}
+
+	log.Printf("[group] host transferred to %s in room %s", newHostID, roomID)
+	return nil
+}
+
+// EndRoomForAll allows the host to end the room for all participants.
+// Verifies the caller is the host before proceeding.
+func (o *Orchestrator) EndRoomForAll(ctx context.Context, roomID, hostID string) error {
+	sess, err := o.store.Get(ctx, roomID)
+	if err != nil {
+		return fmt.Errorf("room not found: %w", err)
+	}
+
+	if sess.CallType != "group" {
+		return fmt.Errorf("session %s is not a group call", roomID)
+	}
+
+	// Verify the caller is the host
+	host := sess.FindParticipant(hostID)
+	if host == nil || host.Role != RoleCaller {
+		return fmt.Errorf("only the host can end the room for all")
+	}
+
+	return o.CloseRoom(ctx, roomID, "host_ended")
 }
