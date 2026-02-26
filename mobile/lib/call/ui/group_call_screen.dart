@@ -5,6 +5,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_webrtc/flutter_webrtc.dart';
 
 import 'package:lalo/call/models/video_slot.dart';
+import 'package:lalo/core/network/reconnection_manager.dart';
 
 /// Participant info for rendering in video slots.
 class ParticipantInfo {
@@ -49,6 +50,8 @@ class GroupCallScreen extends StatefulWidget {
     this.assignment,
     this.onPinToggle,
     this.onLeave,
+    this.reconnectionState = ReconnectionState.idle,
+    this.reconnectionAttempt,
   });
 
   /// Active room identifier.
@@ -68,6 +71,12 @@ class GroupCallScreen extends StatefulWidget {
 
   /// Called when user taps the leave button.
   final VoidCallback? onLeave;
+
+  /// Current reconnection state.
+  final ReconnectionState reconnectionState;
+
+  /// Latest reconnection attempt info (null when idle).
+  final ReconnectionAttempt? reconnectionAttempt;
 
   @override
   State<GroupCallScreen> createState() => _GroupCallScreenState();
@@ -97,44 +106,62 @@ class _GroupCallScreenState extends State<GroupCallScreen> {
 
   @override
   Widget build(BuildContext context) {
+    final isReconnecting =
+        widget.reconnectionState == ReconnectionState.reconnectingSignaling ||
+            widget.reconnectionState == ReconnectionState.restartingIce;
+    final isFailed = widget.reconnectionState == ReconnectionState.failed;
+
     return Scaffold(
       backgroundColor: Colors.black,
       body: SafeArea(
-        child: Column(
+        child: Stack(
           children: <Widget>[
-            _TopBar(
-              roomId: widget.roomId,
-              participantCount: widget.participants.length,
-              durationText: _formatDuration(_duration),
-            ),
-            // Active slots: 2×2 grid (HQ + MQ)
-            Expanded(
-              flex: 3,
-              child: Padding(
-                padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
-                child: _buildActiveGrid(),
-              ),
-            ),
-            // Thumbnail strip (LQ slots)
-            if (_hasThumbnails)
-              SizedBox(
-                height: 90,
-                child: Padding(
-                  padding: const EdgeInsets.symmetric(horizontal: 8),
-                  child: _buildThumbnailStrip(),
+            Column(
+              children: <Widget>[
+                _TopBar(
+                  roomId: widget.roomId,
+                  participantCount: widget.participants.length,
+                  durationText: _formatDuration(_duration),
                 ),
-              ),
-            const SizedBox(height: 8),
-            _ControlsBar(
-              isMuted: _isMuted,
-              cameraOn: _cameraOn,
-              speakerOn: _speakerOn,
-              onToggleMute: () => setState(() => _isMuted = !_isMuted),
-              onToggleCamera: () => setState(() => _cameraOn = !_cameraOn),
-              onToggleSpeaker: () => setState(() => _speakerOn = !_speakerOn),
-              onLeave: widget.onLeave ?? () => Navigator.of(context).maybePop(),
+                // Active slots: 2×2 grid (HQ + MQ)
+                Expanded(
+                  flex: 3,
+                  child: Padding(
+                    padding:
+                        const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+                    child: _buildActiveGrid(),
+                  ),
+                ),
+                // Thumbnail strip (LQ slots)
+                if (_hasThumbnails)
+                  SizedBox(
+                    height: 90,
+                    child: Padding(
+                      padding: const EdgeInsets.symmetric(horizontal: 8),
+                      child: _buildThumbnailStrip(),
+                    ),
+                  ),
+                const SizedBox(height: 8),
+                _ControlsBar(
+                  isMuted: _isMuted,
+                  cameraOn: _cameraOn,
+                  speakerOn: _speakerOn,
+                  onToggleMute: () => setState(() => _isMuted = !_isMuted),
+                  onToggleCamera: () => setState(() => _cameraOn = !_cameraOn),
+                  onToggleSpeaker: () =>
+                      setState(() => _speakerOn = !_speakerOn),
+                  onLeave:
+                      widget.onLeave ?? () => Navigator.of(context).maybePop(),
+                ),
+                const SizedBox(height: 12),
+              ],
             ),
-            const SizedBox(height: 12),
+            // Reconnection overlay
+            if (isReconnecting || isFailed)
+              _ReconnectionOverlay(
+                state: widget.reconnectionState,
+                attempt: widget.reconnectionAttempt,
+              ),
           ],
         ),
       ),
@@ -814,5 +841,101 @@ class _ControlButton extends StatelessWidget {
         child: Icon(icon, color: Colors.white),
       ),
     );
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Reconnection overlay: shown during signaling/ICE reconnect or failure
+// ---------------------------------------------------------------------------
+
+class _ReconnectionOverlay extends StatelessWidget {
+  const _ReconnectionOverlay({
+    required this.state,
+    this.attempt,
+  });
+
+  final ReconnectionState state;
+  final ReconnectionAttempt? attempt;
+
+  @override
+  Widget build(BuildContext context) {
+    final isFailed = state == ReconnectionState.failed;
+
+    return Positioned(
+      left: 0,
+      right: 0,
+      top: 0,
+      child: AnimatedSwitcher(
+        duration: const Duration(milliseconds: 300),
+        child: Container(
+          key: ValueKey<ReconnectionState>(state),
+          width: double.infinity,
+          padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+          color: isFailed
+              ? Colors.red.shade700.withValues(alpha: 0.95)
+              : Colors.orange.shade700.withValues(alpha: 0.9),
+          child: SafeArea(
+            bottom: false,
+            child: Row(
+              children: <Widget>[
+                if (!isFailed)
+                  const Padding(
+                    padding: EdgeInsets.only(right: 10),
+                    child: SizedBox(
+                      width: 16,
+                      height: 16,
+                      child: CircularProgressIndicator(
+                        strokeWidth: 2,
+                        color: Colors.white,
+                      ),
+                    ),
+                  ),
+                if (isFailed)
+                  const Padding(
+                    padding: EdgeInsets.only(right: 10),
+                    child: Icon(
+                      Icons.error_outline,
+                      color: Colors.white,
+                      size: 18,
+                    ),
+                  ),
+                Expanded(
+                  child: Text(
+                    _message,
+                    style: const TextStyle(
+                      color: Colors.white,
+                      fontWeight: FontWeight.w600,
+                      fontSize: 13,
+                    ),
+                  ),
+                ),
+                if (attempt != null && !isFailed)
+                  Text(
+                    '${attempt!.attempt}/${attempt!.maxAttempts}',
+                    style: const TextStyle(
+                      color: Colors.white70,
+                      fontSize: 12,
+                    ),
+                  ),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
+  String get _message {
+    switch (state) {
+      case ReconnectionState.reconnectingSignaling:
+        return 'Reconnecting…';
+      case ReconnectionState.restartingIce:
+        return 'Restoring media…';
+      case ReconnectionState.failed:
+        return 'Connection lost';
+      case ReconnectionState.idle:
+      case ReconnectionState.reconnected:
+        return '';
+    }
   }
 }

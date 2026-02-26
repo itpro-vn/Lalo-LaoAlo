@@ -3,6 +3,7 @@ import 'package:flutter_test/flutter_test.dart';
 
 import 'package:lalo/call/models/video_slot.dart';
 import 'package:lalo/call/ui/group_call_screen.dart';
+import 'package:lalo/core/network/reconnection_manager.dart';
 
 void main() {
   group('GroupCallScreen', () {
@@ -54,6 +55,8 @@ void main() {
       VideoSlotAssignment? assignment,
       VoidCallback? onLeave,
       OnPinToggle? onPinToggle,
+      ReconnectionState reconnectionState = ReconnectionState.idle,
+      ReconnectionAttempt? reconnectionAttempt,
     }) {
       return MaterialApp(
         home: GroupCallScreen(
@@ -63,6 +66,8 @@ void main() {
           assignment: assignment,
           onLeave: onLeave,
           onPinToggle: onPinToggle,
+          reconnectionState: reconnectionState,
+          reconnectionAttempt: reconnectionAttempt,
         ),
       );
     }
@@ -325,6 +330,79 @@ void main() {
       await tester.pump(const Duration(seconds: 5));
 
       expect(find.text('00:05'), findsOneWidget);
+    });
+
+    // -----------------------------------------------------------------------
+    // Reconnection overlay tests
+    // -----------------------------------------------------------------------
+
+    testWidgets('no overlay when reconnection state is idle', (tester) async {
+      await tester.pumpWidget(_buildScreen());
+
+      expect(find.text('Reconnecting…'), findsNothing);
+      expect(find.text('Restoring media…'), findsNothing);
+      expect(find.text('Connection lost'), findsNothing);
+    });
+
+    testWidgets('shows "Reconnecting…" overlay for signaling reconnect',
+        (tester) async {
+      await tester.pumpWidget(_buildScreen(
+        reconnectionState: ReconnectionState.reconnectingSignaling,
+      ));
+      // Use pump() instead of pumpAndSettle() — CircularProgressIndicator
+      // animates indefinitely and never settles.
+      await tester.pump(const Duration(milliseconds: 400));
+
+      expect(find.text('Reconnecting…'), findsOneWidget);
+    });
+
+    testWidgets('shows "Restoring media…" overlay for ICE restart',
+        (tester) async {
+      await tester.pumpWidget(_buildScreen(
+        reconnectionState: ReconnectionState.restartingIce,
+        reconnectionAttempt: const ReconnectionAttempt(
+          attempt: 2,
+          maxAttempts: 3,
+          reason: 'network_handover',
+          succeeded: true,
+        ),
+      ));
+      await tester.pump(const Duration(milliseconds: 400));
+
+      expect(find.text('Restoring media…'), findsOneWidget);
+      // Shows attempt counter
+      expect(find.text('2/3'), findsOneWidget);
+    });
+
+    testWidgets('shows "Connection lost" overlay when failed', (tester) async {
+      await tester.pumpWidget(_buildScreen(
+        reconnectionState: ReconnectionState.failed,
+      ));
+      await tester.pumpAndSettle();
+
+      expect(find.text('Connection lost'), findsOneWidget);
+      // Error icon
+      expect(find.byIcon(Icons.error_outline), findsOneWidget);
+    });
+
+    testWidgets('reconnection overlay shows spinner when reconnecting',
+        (tester) async {
+      await tester.pumpWidget(_buildScreen(
+        reconnectionState: ReconnectionState.restartingIce,
+      ));
+      await tester.pump(const Duration(milliseconds: 400));
+
+      expect(find.byType(CircularProgressIndicator), findsOneWidget);
+    });
+
+    testWidgets('reconnection overlay shows no spinner when failed',
+        (tester) async {
+      await tester.pumpWidget(_buildScreen(
+        reconnectionState: ReconnectionState.failed,
+      ));
+      await tester.pumpAndSettle();
+
+      expect(find.byType(CircularProgressIndicator), findsNothing);
     });
   });
 }

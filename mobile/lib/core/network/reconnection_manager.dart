@@ -131,6 +131,10 @@ class ReconnectionManager {
     _messageSub = null;
     _graceTimer?.cancel();
     _graceTimer = null;
+    _backoffTimer?.cancel();
+    _backoffTimer = null;
+    _iceTimeoutTimer?.cancel();
+    _iceTimeoutTimer = null;
     _currentAttempt = 0;
     _setState(ReconnectionState.idle);
   }
@@ -192,7 +196,7 @@ class ReconnectionManager {
         _handleSessionResumed(message.data);
       case msgPeerReconnecting:
         _log.info('Peer is reconnecting');
-        // UI can listen to the message stream directly
+      // UI can listen to the message stream directly
       case msgPeerReconnected:
         _log.info('Peer has reconnected');
       default:
@@ -235,7 +239,10 @@ class ReconnectionManager {
     );
   }
 
-  /// Trigger ICE restart with attempt tracking.
+  Timer? _backoffTimer;
+  Timer? _iceTimeoutTimer;
+
+  /// Trigger ICE restart with attempt tracking and backoff delays.
   void _triggerIceRestart(String reason) {
     if (_currentAttempt >= config.maxAttempts) {
       _log.warning('Max ICE restart attempts reached');
@@ -243,10 +250,30 @@ class ReconnectionManager {
       _emitAttempt(
         reason: reason,
         succeeded: false,
-        error: 'Max attempts (${ config.maxAttempts}) reached',
+        error: 'Max attempts (${config.maxAttempts}) reached',
       );
       return;
     }
+
+    // Apply backoff delay before this attempt.
+    final delayIndex = _currentAttempt.clamp(0, config.backoffMs.length - 1);
+    final delayMs = config.backoffMs[delayIndex];
+
+    if (delayMs > 0) {
+      _log.info('Backoff ${delayMs}ms before attempt ${_currentAttempt + 1}');
+      _backoffTimer?.cancel();
+      _backoffTimer = Timer(
+        Duration(milliseconds: delayMs),
+        () => _executeIceRestart(reason),
+      );
+    } else {
+      _executeIceRestart(reason);
+    }
+  }
+
+  /// Execute the actual ICE restart attempt.
+  void _executeIceRestart(String reason) {
+    if (_disposed) return;
 
     _currentAttempt++;
     _setState(ReconnectionState.restartingIce);
@@ -258,8 +285,8 @@ class ReconnectionManager {
       _log.info('ICE restart initiated successfully');
       _emitAttempt(reason: reason, succeeded: true);
 
-      // Wait for ICE to reconnect, handled by ICE state callback
-      // The peer_connection_manager will emit connected/completed state
+      // Wait for ICE to reconnect; if it doesn't within timeout, retry.
+      _scheduleIceTimeout(reason);
     }).catchError((Object error) {
       _log.warning('ICE restart failed', error);
       _emitAttempt(
@@ -268,10 +295,41 @@ class ReconnectionManager {
         error: error.toString(),
       );
 
-      if (_currentAttempt >= config.maxAttempts) {
+      // Auto-retry with next backoff if attempts remain.
+      if (_currentAttempt < config.maxAttempts) {
+        _triggerIceRestart(reason);
+      } else {
         _setState(ReconnectionState.failed);
       }
     });
+  }
+
+  /// Schedule a timeout for ICE restart — if ICE doesn't connect
+  /// within [iceRestartTimeoutMs], retry with the next backoff.
+  void _scheduleIceTimeout(String reason) {
+    _iceTimeoutTimer?.cancel();
+    _iceTimeoutTimer = Timer(
+      Duration(milliseconds: config.iceRestartTimeoutMs),
+      () {
+        if (_disposed) return;
+        if (_state == ReconnectionState.restartingIce) {
+          _log.warning(
+            'ICE restart timed out after ${config.iceRestartTimeoutMs}ms',
+          );
+          if (_currentAttempt < config.maxAttempts) {
+            _triggerIceRestart(reason);
+          } else {
+            _setState(ReconnectionState.failed);
+            _emitAttempt(
+              reason: reason,
+              succeeded: false,
+              error:
+                  'ICE restart timed out after ${config.maxAttempts} attempts',
+            );
+          }
+        }
+      },
+    );
   }
 
   /// Send a session resume message to the server after WSS reconnect.
@@ -292,6 +350,8 @@ class ReconnectionManager {
     if (_state == ReconnectionState.restartingIce ||
         _state == ReconnectionState.reconnectingSignaling) {
       _graceTimer?.cancel();
+      _iceTimeoutTimer?.cancel();
+      _backoffTimer?.cancel();
       _currentAttempt = 0;
       _setState(ReconnectionState.reconnected);
 

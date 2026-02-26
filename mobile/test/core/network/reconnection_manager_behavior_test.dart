@@ -32,7 +32,8 @@ class MockSignalingClient implements SignalingClient {
   bool throwOnSendReconnect = false;
 
   @override
-  Stream<ConnectionState> get onConnectionState => _connectionStateController.stream;
+  Stream<ConnectionState> get onConnectionState =>
+      _connectionStateController.stream;
 
   @override
   Stream<SignalingMessage> get onMessage => _messageController.stream;
@@ -132,7 +133,9 @@ void main() {
       await sub.cancel();
     });
 
-    test('network disconnect triggers signaling reconnect + resume + ICE restart', () async {
+    test(
+        'network disconnect triggers signaling reconnect + resume + ICE restart',
+        () async {
       networkMonitor.emit(_change(NetworkType.wifi, NetworkType.none));
       await flush();
 
@@ -142,10 +145,12 @@ void main() {
       await flush();
       expect(signalingClient.reconnectCallIds, <String>['call-123']);
 
-      signalingClient.emitMessage(const SignalingMessage(
-        type: msgSessionResumed,
-        data: <String, dynamic>{'call_id': 'call-123'},
-      ),);
+      signalingClient.emitMessage(
+        const SignalingMessage(
+          type: msgSessionResumed,
+          data: <String, dynamic>{'call_id': 'call-123'},
+        ),
+      );
       await flush();
 
       expect(peerConnectionManager.restartIceCallCount, 1);
@@ -160,14 +165,22 @@ void main() {
       expect(manager.state, ReconnectionState.restartingIce);
     });
 
-    test('max reconnection attempts reached transitions to failed state', () async {
+    test('max reconnection attempts reached transitions to failed state',
+        () async {
       await manager.dispose();
       manager = ReconnectionManager(
         signalingClient: signalingClient,
         peerConnectionManager: peerConnectionManager,
         networkMonitor: networkMonitor,
         activeCallId: 'call-123',
-        config: const ReconnectionConfig(maxAttempts: 2),
+        config: const ReconnectionConfig(
+          maxAttempts: 2,
+          backoffMs: <int>[
+            0,
+            0,
+            0,
+          ], // No backoff so rapid events execute immediately
+        ),
       );
       manager.start();
 
@@ -191,10 +204,12 @@ void main() {
       final attempts = <ReconnectionAttempt>[];
       final sub = manager.onAttempt.listen(attempts.add);
 
-      signalingClient.emitMessage(const SignalingMessage(
-        type: msgSessionResumed,
-        data: <String, dynamic>{'call_id': 'call-123'},
-      ),);
+      signalingClient.emitMessage(
+        const SignalingMessage(
+          type: msgSessionResumed,
+          data: <String, dynamic>{'call_id': 'call-123'},
+        ),
+      );
       await flush();
 
       expect(peerConnectionManager.restartIceCallCount, 1);
@@ -243,7 +258,9 @@ void main() {
       expect(manager.config.backoffMs, <int>[0, 1000, 3000]);
     });
 
-    test('state transitions: idle → reconnectingSignaling → restartingIce → reconnected → idle', () {
+    test(
+        'state transitions: idle → reconnectingSignaling → restartingIce → reconnected → idle',
+        () {
       return () async {
         final transitions = <ReconnectionState>[];
         final sub = manager.onStateChange.listen(transitions.add);
@@ -253,10 +270,12 @@ void main() {
         networkMonitor.emit(_change(NetworkType.wifi, NetworkType.none));
         await flush();
 
-        signalingClient.emitMessage(const SignalingMessage(
-          type: msgSessionResumed,
-          data: <String, dynamic>{'call_id': 'call-123'},
-        ),);
+        signalingClient.emitMessage(
+          const SignalingMessage(
+            type: msgSessionResumed,
+            data: <String, dynamic>{'call_id': 'call-123'},
+          ),
+        );
         await flush();
 
         manager.onIceConnected();
@@ -288,14 +307,159 @@ void main() {
 
       networkMonitor.emit(_change(NetworkType.wifi, NetworkType.cellular));
       signalingClient.emitConnectionState(ConnectionState.connected);
-      signalingClient.emitMessage(const SignalingMessage(
-        type: msgSessionResumed,
-        data: <String, dynamic>{},
-      ),);
+      signalingClient.emitMessage(
+        const SignalingMessage(
+          type: msgSessionResumed,
+          data: <String, dynamic>{},
+        ),
+      );
       await flush();
 
       expect(peerConnectionManager.restartIceCallCount, 0);
       expect(signalingClient.reconnectCallIds, isEmpty);
+    });
+
+    group('backoff timing', () {
+      test('first attempt (backoff=0ms) executes immediately', () async {
+        networkMonitor.emit(_change(NetworkType.wifi, NetworkType.cellular));
+        await flush();
+
+        // backoff[0] = 0ms, so should execute synchronously
+        expect(peerConnectionManager.restartIceCallCount, 1);
+        expect(manager.state, ReconnectionState.restartingIce);
+      });
+
+      test('second attempt waits for backoff delay', () async {
+        await manager.dispose();
+        manager = ReconnectionManager(
+          signalingClient: signalingClient,
+          peerConnectionManager: peerConnectionManager,
+          networkMonitor: networkMonitor,
+          activeCallId: 'call-123',
+          config: const ReconnectionConfig(
+            maxAttempts: 3,
+            backoffMs: <int>[0, 50, 100], // Short delays for test
+            iceRestartTimeoutMs: 999999, // Disable ICE timeout
+          ),
+        );
+        manager.start();
+
+        // First attempt: immediate
+        networkMonitor.emit(_change(NetworkType.wifi, NetworkType.cellular));
+        await flush();
+        expect(peerConnectionManager.restartIceCallCount, 1);
+
+        // Second handover during ICE restart: 50ms backoff
+        networkMonitor.emit(_change(NetworkType.cellular, NetworkType.wifi));
+        await flush();
+        // Not yet executed (50ms backoff pending)
+        expect(peerConnectionManager.restartIceCallCount, 1);
+
+        // Wait for backoff to fire
+        await Future<void>.delayed(const Duration(milliseconds: 60));
+        expect(peerConnectionManager.restartIceCallCount, 2);
+      });
+    });
+
+    group('auto-retry on ICE restart failure', () {
+      test('auto-retries with backoff after ICE restart failure', () async {
+        await manager.dispose();
+        peerConnectionManager.restartIceError = StateError('ICE failed');
+        manager = ReconnectionManager(
+          signalingClient: signalingClient,
+          peerConnectionManager: peerConnectionManager,
+          networkMonitor: networkMonitor,
+          activeCallId: 'call-123',
+          config: const ReconnectionConfig(
+            maxAttempts: 3,
+            backoffMs: <int>[0, 10, 20],
+          ),
+        );
+        manager.start();
+
+        final attempts = <ReconnectionAttempt>[];
+        final sub = manager.onAttempt.listen(attempts.add);
+
+        // Trigger first attempt (fails immediately, auto-retries)
+        networkMonitor.emit(_change(NetworkType.wifi, NetworkType.cellular));
+        await flush();
+
+        // First attempt fired + failed → auto-retry with 10ms backoff
+        expect(peerConnectionManager.restartIceCallCount, 1);
+        expect(attempts, hasLength(1));
+        expect(attempts[0].succeeded, isFalse);
+
+        // Wait for second attempt (10ms backoff)
+        await Future<void>.delayed(const Duration(milliseconds: 20));
+        expect(peerConnectionManager.restartIceCallCount, 2);
+        expect(attempts, hasLength(2));
+
+        // Wait for third attempt (20ms backoff)
+        await Future<void>.delayed(const Duration(milliseconds: 30));
+        expect(peerConnectionManager.restartIceCallCount, 3);
+        expect(attempts, hasLength(3));
+
+        // All 3 attempts exhausted → failed
+        expect(manager.state, ReconnectionState.failed);
+
+        await sub.cancel();
+      });
+    });
+
+    group('ICE timeout', () {
+      test('ICE timeout triggers retry', () async {
+        await manager.dispose();
+        manager = ReconnectionManager(
+          signalingClient: signalingClient,
+          peerConnectionManager: peerConnectionManager,
+          networkMonitor: networkMonitor,
+          activeCallId: 'call-123',
+          config: const ReconnectionConfig(
+            maxAttempts: 3,
+            backoffMs: <int>[0, 0, 0],
+            iceRestartTimeoutMs: 50,
+          ),
+        );
+        manager.start();
+
+        // First attempt succeeds (ICE restart initiated, but no onIceConnected)
+        networkMonitor.emit(_change(NetworkType.wifi, NetworkType.cellular));
+        await flush();
+        expect(peerConnectionManager.restartIceCallCount, 1);
+        expect(manager.state, ReconnectionState.restartingIce);
+
+        // Wait for ICE timeout → auto-retry
+        await Future<void>.delayed(const Duration(milliseconds: 60));
+        expect(peerConnectionManager.restartIceCallCount, 2);
+      });
+
+      test('ICE timeout cancelled on successful connection', () async {
+        await manager.dispose();
+        manager = ReconnectionManager(
+          signalingClient: signalingClient,
+          peerConnectionManager: peerConnectionManager,
+          networkMonitor: networkMonitor,
+          activeCallId: 'call-123',
+          config: const ReconnectionConfig(
+            maxAttempts: 3,
+            backoffMs: <int>[0, 0, 0],
+            iceRestartTimeoutMs: 50,
+          ),
+        );
+        manager.start();
+
+        networkMonitor.emit(_change(NetworkType.wifi, NetworkType.cellular));
+        await flush();
+        expect(peerConnectionManager.restartIceCallCount, 1);
+
+        // ICE connects before timeout
+        manager.onIceConnected();
+        expect(manager.state, ReconnectionState.reconnected);
+
+        // Wait past timeout — no retry should fire
+        await Future<void>.delayed(const Duration(milliseconds: 80));
+        expect(peerConnectionManager.restartIceCallCount, 1);
+      });
     });
   });
 }
