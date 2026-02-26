@@ -80,3 +80,29 @@ rate_limits:
   signaling_messages_per_connection: "100/min"
   turn_allocations_per_user: "5/min"
   api_requests_per_user: "60/min"
+
+policy_engine:
+  enabled: true
+  eval_interval_seconds: 10
+  metric_window_seconds: 30
+  rules:
+    - name: high_loss_cap_fair
+      condition: avg_loss_above
+      threshold: 8.0
+      action: cap_tier
+      action_value: fair
+    - name: very_high_loss_cap_poor
+      condition: avg_loss_above
+      threshold: 15.0
+      action: cap_tier
+      action_value: poor
+    - name: high_rtt_cap_fair
+      condition: avg_rtt_above
+      threshold: 300.0
+      action: cap_tier
+      action_value: fair
+    - name: low_bandwidth_audio_only
+      condition: bandwidth_below
+      threshold: 80.0
+      action: force_audio_only
+      action_value: "true"

@@ -280,3 +280,71 @@ class LayerUpdateEvent extends Equatable {
   List<Object?> get props =>
       <Object?>[roomId, trackSid, layer, publisherId, reason];
 }
+
+/// Event emitted when the server-side policy engine pushes an ABR override.
+///
+/// The policy engine evaluates room-wide quality metrics and may override
+/// client-side ABR decisions (e.g., cap tier, force audio-only, force codec).
+class PolicyUpdateEvent extends Equatable {
+  /// Creates a [PolicyUpdateEvent].
+  const PolicyUpdateEvent({
+    required this.roomId,
+    this.maxTier,
+    this.forceAudioOnly,
+    this.maxBitrateKbps,
+    this.forceCodec,
+    this.reason,
+  });
+
+  /// Room identifier.
+  final String roomId;
+
+  /// Maximum allowed quality tier ('good', 'fair', 'poor').
+  final String? maxTier;
+
+  /// Whether to force audio-only mode.
+  final bool? forceAudioOnly;
+
+  /// Maximum allowed bitrate in kbps.
+  final int? maxBitrateKbps;
+
+  /// Force a specific video codec ('vp8', 'h264').
+  final String? forceCodec;
+
+  /// Reason for the policy override.
+  final String? reason;
+
+  /// Builds event from signaling payload.
+  factory PolicyUpdateEvent.fromJson(Map<String, dynamic> json) {
+    return PolicyUpdateEvent(
+      roomId: (json['room_id'] ?? json['roomId'] ?? '').toString(),
+      maxTier: json['max_tier']?.toString(),
+      forceAudioOnly: json['force_audio_only'] as bool?,
+      maxBitrateKbps: json['max_bitrate_kbps'] as int?,
+      forceCodec: json['force_codec']?.toString(),
+      reason: json['reason']?.toString(),
+    );
+  }
+
+  /// Converts event to JSON-serializable map.
+  Map<String, dynamic> toJson() {
+    return <String, dynamic>{
+      'room_id': roomId,
+      if (maxTier != null) 'max_tier': maxTier,
+      if (forceAudioOnly != null) 'force_audio_only': forceAudioOnly,
+      if (maxBitrateKbps != null) 'max_bitrate_kbps': maxBitrateKbps,
+      if (forceCodec != null) 'force_codec': forceCodec,
+      if (reason != null && reason!.isNotEmpty) 'reason': reason,
+    };
+  }
+
+  @override
+  List<Object?> get props => <Object?>[
+        roomId,
+        maxTier,
+        forceAudioOnly,
+        maxBitrateKbps,
+        forceCodec,
+        reason,
+      ];
+}

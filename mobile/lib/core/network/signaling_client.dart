@@ -39,6 +39,7 @@ const String msgParticipantJoined = 'participant_joined';
 const String msgParticipantLeft = 'participant_left';
 const String msgParticipantMediaChanged = 'participant_media_changed';
 const String msgLayerUpdate = 'layer_update';
+const String msgPolicyUpdate = 'policy_update';
 
 /// Connection state for signaling WebSocket lifecycle.
 enum ConnectionState {

@@ -362,6 +362,44 @@ class PeerConnectionManager {
     return true;
   }
 
+  /// Returns the audio [RTCRtpSender], or `null` if none exists.
+  Future<webrtc.RTCRtpSender?> getAudioSender() async {
+    final pc = _peerConnection;
+    if (pc == null) return null;
+
+    final senders = await pc.getSenders();
+    for (final sender in senders) {
+      if (sender.track?.kind == 'audio') {
+        return sender;
+      }
+    }
+    return null;
+  }
+
+  /// Applies audio encoding parameters to the audio sender.
+  ///
+  /// [maxBitrateKbps] – target max bitrate in kbps (Opus).
+  /// Returns `true` if the parameters were applied successfully.
+  Future<bool> setAudioEncodingParameters({
+    int? maxBitrateKbps,
+  }) async {
+    final sender = await getAudioSender();
+    if (sender == null) return false;
+
+    final params = sender.parameters;
+    final encodings = params.encodings;
+    if (encodings == null || encodings.isEmpty) return false;
+
+    for (final encoding in encodings) {
+      if (maxBitrateKbps != null) {
+        encoding.maxBitrate = maxBitrateKbps * 1000; // bps
+      }
+    }
+
+    await sender.setParameters(params);
+    return true;
+  }
+
   Future<void> close() async {
     if (_isClosed) return;
     _isClosed = true;

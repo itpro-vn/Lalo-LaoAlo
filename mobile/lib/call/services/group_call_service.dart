@@ -35,6 +35,8 @@ class GroupCallService {
       StreamController<ParticipantEvent>.broadcast();
   final StreamController<LayerUpdateEvent> _layerUpdateController =
       StreamController<LayerUpdateEvent>.broadcast();
+  final StreamController<PolicyUpdateEvent> _policyUpdateController =
+      StreamController<PolicyUpdateEvent>.broadcast();
 
   StreamSubscription<SignalingMessage>? _messageSubscription;
 
@@ -58,6 +60,10 @@ class GroupCallService {
 
   /// Emits parsed `layer_update` events from signaling.
   Stream<LayerUpdateEvent> get onLayerUpdate => _layerUpdateController.stream;
+
+  /// Emits parsed `policy_update` events from signaling.
+  Stream<PolicyUpdateEvent> get onPolicyUpdate =>
+      _policyUpdateController.stream;
 
   /// Creates room via API and joins via signaling.
   Future<RoomCreatedEvent> createRoom(
@@ -109,6 +115,17 @@ class GroupCallService {
     _signalingClient.requestLayer(roomId, trackSid, layer);
   }
 
+  /// Sends quality metrics to the server for policy engine evaluation.
+  ///
+  /// [callId] — call/room identifier.
+  /// [samples] — list of quality metric samples.
+  void sendQualityMetrics(
+    String callId,
+    List<Map<String, dynamic>> samples,
+  ) {
+    _signalingClient.sendQualityMetrics(callId, samples);
+  }
+
   void _handleSignalMessage(SignalingMessage message) {
     switch (message.type) {
       case msgRoomCreated:
@@ -130,6 +147,10 @@ class GroupCallService {
         return;
       case msgLayerUpdate:
         _layerUpdateController.add(LayerUpdateEvent.fromJson(message.data));
+        return;
+      case msgPolicyUpdate:
+        _policyUpdateController
+            .add(PolicyUpdateEvent.fromJson(message.data));
         return;
       case msgParticipantMediaChanged:
       case msgIncomingCall:
@@ -167,5 +188,6 @@ class GroupCallService {
     await _participantJoinedController.close();
     await _participantLeftController.close();
     await _layerUpdateController.close();
+    await _policyUpdateController.close();
   }
 }

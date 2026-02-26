@@ -26,6 +26,7 @@ type Config struct {
 	Redis      RedisConfig      `yaml:"redis"`
 	NATS       NATSConfig       `yaml:"nats"`
 	ClickHouse ClickHouseConfig `yaml:"clickhouse"`
+	PolicyEngine PolicyEngineConfig `yaml:"policy_engine"`
 }
 
 // AuthConfig holds JWT authentication settings.
@@ -208,6 +209,23 @@ type ClickHouseConfig struct {
 	Database string `yaml:"database"`
 	User     string `yaml:"user"`
 	Password string `yaml:"password"`
+}
+
+// PolicyEngineConfig holds ABR policy engine settings.
+type PolicyEngineConfig struct {
+	Enabled             bool               `yaml:"enabled"`
+	EvalIntervalSeconds int                `yaml:"eval_interval_seconds"`
+	MetricWindowSeconds int                `yaml:"metric_window_seconds"`
+	Rules               []PolicyRuleConfig `yaml:"rules"`
+}
+
+// PolicyRuleConfig defines a single evaluable ABR rule.
+type PolicyRuleConfig struct {
+	Name        string  `yaml:"name"`
+	Condition   string  `yaml:"condition"`
+	Threshold   float64 `yaml:"threshold"`
+	Action      string  `yaml:"action"`
+	ActionValue string  `yaml:"action_value"`
 }
 
 // Load reads configuration from the default config path, with
