@@ -29,6 +29,12 @@ type Hub struct {
 	graceTimers   map[string]context.CancelFunc
 	graceTimersMu sync.Mutex
 
+	// Room grace period tracking: userID → cancel func.
+	// When a client disconnects while in group rooms, we keep them in the room
+	// briefly to avoid participant_left/joined churn on transient disconnects.
+	roomGraceTimers   map[string]context.CancelFunc
+	roomGraceTimersMu sync.Mutex
+
 	// Buffered ICE candidates during reconnect: callID → []ICECandidateMsg.
 	iceBuf   map[string][]ICECandidateMsg
 	iceBufMu sync.Mutex
@@ -55,8 +61,9 @@ func NewHub(sessions *SessionStore, bus *events.Bus, cfg *config.Config, orch *s
 	return &Hub{
 		clients:     make(map[string]*Client),
 		rooms:       make(map[string]map[string]bool),
-		graceTimers: make(map[string]context.CancelFunc),
-		iceBuf:      make(map[string][]ICECandidateMsg),
+		graceTimers:     make(map[string]context.CancelFunc),
+		roomGraceTimers: make(map[string]context.CancelFunc),
+		iceBuf:          make(map[string][]ICECandidateMsg),
 		register:    make(chan *Client),
 		unregister:  make(chan *Client),
 		incoming:    make(chan *ClientMessage, 256),
@@ -81,7 +88,13 @@ func (h *Hub) Run() {
 			}
 			h.clients[client.userID] = client
 			h.clientsMu.Unlock()
-			log.Printf("client registered: user=%s", client.userID)
+
+			// Cancel room grace timer if user is reconnecting while in rooms
+			if h.cancelRoomGracePeriod(client.userID) {
+				log.Printf("client re-registered (room grace cancelled): user=%s", client.userID)
+			} else {
+				log.Printf("client registered: user=%s", client.userID)
+			}
 
 		case client := <-h.unregister:
 			h.clientsMu.Lock()
@@ -94,8 +107,12 @@ func (h *Hub) Run() {
 			// instead of immediately cleaning up.
 			if h.startGracePeriod(client.userID) {
 				log.Printf("client disconnected (grace period started): user=%s", client.userID)
+			} else if h.startRoomGracePeriod(client.userID) {
+				// User is in group rooms — start room grace period to avoid
+				// participant_left/joined churn on transient disconnects.
+				log.Printf("client disconnected (room grace period started): user=%s", client.userID)
 			} else {
-				// No active call — clean up immediately
+				// No active call or rooms — clean up immediately
 				h.removeFromAllRooms(client.userID)
 				log.Printf("client unregistered: user=%s", client.userID)
 			}
@@ -615,6 +632,81 @@ func (h *Hub) cancelGracePeriod(userID string) bool {
 	return ok
 }
 
+// getUserRooms returns all room IDs a user is currently in.
+func (h *Hub) getUserRooms(userID string) []string {
+	h.roomsMu.RLock()
+	defer h.roomsMu.RUnlock()
+	var rooms []string
+	for roomID, members := range h.rooms {
+		if members[userID] {
+			rooms = append(rooms, roomID)
+		}
+	}
+	return rooms
+}
+
+// startRoomGracePeriod starts a grace timer for a user in group rooms.
+// During the grace period, the user remains "in room" so other participants
+// don't see participant_left/joined churn on transient disconnects.
+// Returns true if the user is in at least one room and grace was started.
+func (h *Hub) startRoomGracePeriod(userID string) bool {
+	rooms := h.getUserRooms(userID)
+	if len(rooms) == 0 {
+		return false
+	}
+
+	graceDuration := h.reconnectGracePeriod()
+	graceCtx, graceCancel := context.WithCancel(h.ctx)
+
+	h.roomGraceTimersMu.Lock()
+	if existing, ok := h.roomGraceTimers[userID]; ok {
+		existing()
+	}
+	h.roomGraceTimers[userID] = graceCancel
+	h.roomGraceTimersMu.Unlock()
+
+	log.Printf("[room-grace] started for user=%s rooms=%v duration=%v", userID, rooms, graceDuration)
+
+	go h.roomGraceTimeout(graceCtx, userID, rooms, graceDuration)
+
+	return true
+}
+
+// cancelRoomGracePeriod cancels the room grace timer for a user.
+// Returns true if a timer was active and cancelled.
+func (h *Hub) cancelRoomGracePeriod(userID string) bool {
+	h.roomGraceTimersMu.Lock()
+	cancelFn, ok := h.roomGraceTimers[userID]
+	if ok {
+		delete(h.roomGraceTimers, userID)
+	}
+	h.roomGraceTimersMu.Unlock()
+
+	if ok {
+		cancelFn()
+	}
+	return ok
+}
+
+// roomGraceTimeout removes the user from all rooms if they don't reconnect
+// within the grace period.
+func (h *Hub) roomGraceTimeout(graceCtx context.Context, userID string, rooms []string, graceDuration time.Duration) {
+	select {
+	case <-time.After(graceDuration):
+		log.Printf("[room-grace] expired for user=%s rooms=%v", userID, rooms)
+
+		h.roomGraceTimersMu.Lock()
+		delete(h.roomGraceTimers, userID)
+		h.roomGraceTimersMu.Unlock()
+
+		h.removeFromAllRooms(userID)
+
+	case <-graceCtx.Done():
+		// Cancelled — user reconnected or hub shut down
+		return
+	}
+}
+
 // reconnectGraceTimeout ends the call if the user doesn't reconnect within the grace period.
 func (h *Hub) reconnectGraceTimeout(graceCtx context.Context, userID, callID, peerID string) {
 	graceDuration := h.reconnectGracePeriod()
@@ -928,9 +1020,26 @@ func (h *Hub) handleRoomJoin(client *Client, data json.RawMessage) {
 		return
 	}
 
-	// Check if already in room locally
+	// Handle re-join during room grace period (transient disconnect).
+	// Instead of erroring, refresh LiveKit credentials and return.
 	if h.isInRoom(msg.RoomID, client.userID) {
-		client.SendError(ErrCodeInvalidState, "already in room", msg.RoomID)
+		// Cancel room grace timer if active
+		h.cancelRoomGracePeriod(client.userID)
+
+		resp, err := h.orchestrator.JoinGroupSession(h.ctx, msg.RoomID, client.userID)
+		if err != nil {
+			log.Printf("[hub] room re-join error: %v", err)
+			client.SendError(ErrCodeInternal, err.Error(), msg.RoomID)
+			return
+		}
+
+		log.Printf("[hub] room re-join for user=%s room=%s", client.userID, msg.RoomID)
+
+		client.SendJSON(MsgRoomCreated, RoomCreatedMsg{
+			RoomID:       msg.RoomID,
+			LiveKitToken: resp.LiveKitToken,
+			LiveKitURL:   resp.LiveKitURL,
+		})
 		return
 	}
 

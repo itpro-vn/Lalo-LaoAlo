@@ -5,7 +5,7 @@ import 'package:lalo/call/models/group_call_models.dart';
 void main() {
   group('LayerUpdateEvent', () {
     test('fromJson parses standard keys', () {
-      final event = LayerUpdateEvent.fromJson(<String, dynamic>{
+      final event = LayerUpdateEvent.fromJson(const <String, dynamic>{
         'room_id': 'room-1',
         'track_sid': 'TR_abc',
         'layer': 'h',
@@ -20,7 +20,7 @@ void main() {
     });
 
     test('fromJson handles camelCase keys', () {
-      final event = LayerUpdateEvent.fromJson(<String, dynamic>{
+      final event = LayerUpdateEvent.fromJson(const <String, dynamic>{
         'roomId': 'room-2',
         'trackSid': 'TR_xyz',
         'layer': 'm',
@@ -33,7 +33,7 @@ void main() {
     });
 
     test('fromJson handles missing optional fields', () {
-      final event = LayerUpdateEvent.fromJson(<String, dynamic>{
+      final event = LayerUpdateEvent.fromJson(const <String, dynamic>{
         'room_id': 'room-3',
         'track_sid': 'TR_123',
         'layer': 'l',

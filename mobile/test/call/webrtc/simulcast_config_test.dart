@@ -143,7 +143,7 @@ void main() {
     });
 
     test('defaultConfig layers match PB-02 spec', () {
-      final config = SimulcastConfig.defaultConfig;
+      const config = SimulcastConfig.defaultConfig;
 
       final high = config.getEncoding(SimulcastLayer.high)!;
       expect(high.maxBitrateKbps, 1500);

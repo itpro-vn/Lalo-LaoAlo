@@ -5,6 +5,21 @@ import 'package:lalo/call/webrtc/media_manager.dart';
 import 'package:lalo/core/network/api_client.dart';
 import 'package:lalo/core/network/signaling_client.dart';
 
+/// Reconnection state for a group call room.
+enum GroupCallReconnectionState {
+  /// No active reconnection.
+  idle,
+
+  /// WebSocket reconnected, re-joining room for fresh credentials.
+  rejoining,
+
+  /// Successfully re-joined room after reconnection.
+  rejoined,
+
+  /// Reconnection failed.
+  failed,
+}
+
 /// Orchestrates group-call room lifecycle across API and signaling layers.
 class GroupCallService {
   /// Creates a [GroupCallService].
@@ -17,11 +32,19 @@ class GroupCallService {
         _mediaManager = mediaManager {
     _messageSubscription =
         _signalingClient.onMessage.listen(_handleSignalMessage);
+    _connectionSubscription =
+        _signalingClient.onConnectionState.listen(_handleConnectionState);
   }
 
   final SignalingClient _signalingClient;
   final ApiClient _apiClient;
   final MediaManager _mediaManager;
+
+  /// The currently active room ID, or null if not in a room.
+  String? _activeRoomId;
+
+  /// Whether we are currently reconnecting.
+  var _reconnectionState = GroupCallReconnectionState.idle;
 
   final StreamController<RoomCreatedEvent> _roomCreatedController =
       StreamController<RoomCreatedEvent>.broadcast();
@@ -37,8 +60,12 @@ class GroupCallService {
       StreamController<LayerUpdateEvent>.broadcast();
   final StreamController<PolicyUpdateEvent> _policyUpdateController =
       StreamController<PolicyUpdateEvent>.broadcast();
+  final StreamController<GroupCallReconnectionState>
+      _reconnectionStateController =
+      StreamController<GroupCallReconnectionState>.broadcast();
 
   StreamSubscription<SignalingMessage>? _messageSubscription;
+  StreamSubscription<ConnectionState>? _connectionSubscription;
 
   /// Emits parsed `room_created` events from signaling.
   Stream<RoomCreatedEvent> get onRoomCreated => _roomCreatedController.stream;
@@ -65,6 +92,16 @@ class GroupCallService {
   Stream<PolicyUpdateEvent> get onPolicyUpdate =>
       _policyUpdateController.stream;
 
+  /// Emits group call reconnection state changes.
+  Stream<GroupCallReconnectionState> get onReconnectionState =>
+      _reconnectionStateController.stream;
+
+  /// The currently active room ID, or null if not in a room.
+  String? get activeRoomId => _activeRoomId;
+
+  /// Current reconnection state.
+  GroupCallReconnectionState get reconnectionState => _reconnectionState;
+
   /// Creates room via API and joins via signaling.
   Future<RoomCreatedEvent> createRoom(
     List<String> participants,
@@ -77,6 +114,7 @@ class GroupCallService {
       throw StateError('createRoom response missing roomId');
     }
 
+    _activeRoomId = event.roomId;
     _signalingClient.joinRoom(event.roomId);
     return event;
   }
@@ -91,6 +129,7 @@ class GroupCallService {
     });
 
     await _mediaManager.initialize();
+    _activeRoomId = roomId;
     _signalingClient.joinRoom(roomId);
     return event;
   }
@@ -99,6 +138,9 @@ class GroupCallService {
   Future<void> leaveRoom(String roomId) async {
     _signalingClient.leaveRoom(roomId);
     await _apiClient.leaveRoom(roomId);
+    if (_activeRoomId == roomId) {
+      _activeRoomId = null;
+    }
   }
 
   /// Invites additional participants via signaling.
@@ -126,6 +168,43 @@ class GroupCallService {
     _signalingClient.sendQualityMetrics(callId, samples);
   }
 
+  void _handleConnectionState(ConnectionState state) {
+    if (state == ConnectionState.connected && _activeRoomId != null) {
+      _handleSignalingReconnected();
+    }
+  }
+
+  /// Re-joins the active room after signaling reconnection to get fresh
+  /// LiveKit credentials. The backend's room grace period keeps us "in room"
+  /// during the transient disconnect, so other participants don't see churn.
+  Future<void> _handleSignalingReconnected() async {
+    final roomId = _activeRoomId;
+    if (roomId == null) return;
+
+    _setReconnectionState(GroupCallReconnectionState.rejoining);
+
+    try {
+      // Re-join via signaling to get fresh LiveKit credentials.
+      // The backend handles this as a re-join (user still tracked in room).
+      _signalingClient.joinRoom(roomId);
+      _setReconnectionState(GroupCallReconnectionState.rejoined);
+
+      // Auto-reset to idle after state is consumed.
+      Future<void>.delayed(const Duration(seconds: 2), () {
+        if (_reconnectionState == GroupCallReconnectionState.rejoined) {
+          _setReconnectionState(GroupCallReconnectionState.idle);
+        }
+      });
+    } on Object {
+      _setReconnectionState(GroupCallReconnectionState.failed);
+    }
+  }
+
+  void _setReconnectionState(GroupCallReconnectionState state) {
+    _reconnectionState = state;
+    _reconnectionStateController.add(state);
+  }
+
   void _handleSignalMessage(SignalingMessage message) {
     switch (message.type) {
       case msgRoomCreated:
@@ -137,6 +216,11 @@ class GroupCallService {
         return;
       case msgRoomClosed:
         _roomClosedController.add(RoomClosedEvent.fromJson(message.data));
+        // Room is closed — clear active room
+        final event = RoomClosedEvent.fromJson(message.data);
+        if (event.roomId == _activeRoomId) {
+          _activeRoomId = null;
+        }
         return;
       case msgParticipantJoined:
         _participantJoinedController
@@ -179,8 +263,11 @@ class GroupCallService {
 
   /// Releases stream and subscription resources.
   Future<void> dispose() async {
+    _activeRoomId = null;
     await _messageSubscription?.cancel();
     _messageSubscription = null;
+    await _connectionSubscription?.cancel();
+    _connectionSubscription = null;
 
     await _roomCreatedController.close();
     await _roomInvitationController.close();
@@ -189,5 +276,6 @@ class GroupCallService {
     await _participantLeftController.close();
     await _layerUpdateController.close();
     await _policyUpdateController.close();
+    await _reconnectionStateController.close();
   }
 }
