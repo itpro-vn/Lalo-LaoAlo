@@ -22,6 +22,9 @@ enum GroupCallReconnectionState {
 
 /// Orchestrates group-call room lifecycle across API and signaling layers.
 class GroupCallService {
+  /// Maximum participants allowed in a group call room.
+  static const int maxParticipants = 8;
+
   /// Creates a [GroupCallService].
   GroupCallService({
     required SignalingClient signalingClient,
@@ -42,6 +45,12 @@ class GroupCallService {
 
   /// The currently active room ID, or null if not in a room.
   String? _activeRoomId;
+
+  /// Current known host user ID for the active room.
+  String? _hostId;
+
+  /// Tracks participant IDs for the active room.
+  final Set<String> _participants = <String>{};
 
   /// Whether we are currently reconnecting.
   var _reconnectionState = GroupCallReconnectionState.idle;
@@ -99,14 +108,31 @@ class GroupCallService {
   /// The currently active room ID, or null if not in a room.
   String? get activeRoomId => _activeRoomId;
 
+  /// Whether a host is currently known for the active room.
+  bool get isHost => _hostId != null;
+
+  /// Current host ID for the active room, if known.
+  String? get hostId => _hostId;
+
   /// Current reconnection state.
   GroupCallReconnectionState get reconnectionState => _reconnectionState;
+
+  /// Returns true when [userId] is the current room host.
+  bool isUserHost(String userId) => _hostId == userId;
 
   /// Creates room via API and joins via signaling.
   Future<RoomCreatedEvent> createRoom(
     List<String> participants,
     String callType,
   ) async {
+    if (participants.length > maxParticipants) {
+      throw ArgumentError.value(
+        participants.length,
+        'participants',
+        'Participants must be <= $maxParticipants',
+      );
+    }
+
     final payload = await _apiClient.createRoom(participants, callType);
     final event = RoomCreatedEvent.fromJson(payload);
 
@@ -114,6 +140,11 @@ class GroupCallService {
       throw StateError('createRoom response missing roomId');
     }
 
+    _participants
+      ..clear()
+      ..addAll(participants);
+    _hostId = _extractHostId(payload) ??
+        (participants.isNotEmpty ? participants.first : null);
     _activeRoomId = event.roomId;
     _signalingClient.joinRoom(event.roomId);
     return event;
@@ -129,6 +160,7 @@ class GroupCallService {
     });
 
     await _mediaManager.initialize();
+    _hostId = _extractHostId(payload);
     _activeRoomId = roomId;
     _signalingClient.joinRoom(roomId);
     return event;
@@ -138,6 +170,8 @@ class GroupCallService {
   Future<void> leaveRoom(String roomId) async {
     _signalingClient.leaveRoom(roomId);
     await _apiClient.leaveRoom(roomId);
+    _participants.clear();
+    _hostId = null;
     if (_activeRoomId == roomId) {
       _activeRoomId = null;
     }
@@ -215,26 +249,41 @@ class GroupCallService {
             .add(RoomInvitationEvent.fromJson(message.data));
         return;
       case msgRoomClosed:
-        _roomClosedController.add(RoomClosedEvent.fromJson(message.data));
-        // Room is closed — clear active room
         final event = RoomClosedEvent.fromJson(message.data);
+        _roomClosedController.add(event);
+        _participants.clear();
+        _hostId = null;
+        // Room is closed — clear active room
         if (event.roomId == _activeRoomId) {
           _activeRoomId = null;
         }
         return;
       case msgParticipantJoined:
-        _participantJoinedController
-            .add(ParticipantEvent.fromJson(message.data));
+        final event = ParticipantEvent.fromJson(message.data);
+        final userId = event.userId;
+        if (userId.isNotEmpty &&
+            !_participants.contains(userId) &&
+            _participants.length >= maxParticipants) {
+          return;
+        }
+        if (userId.isNotEmpty) {
+          _participants.add(userId);
+        }
+        _participantJoinedController.add(event);
         return;
       case msgParticipantLeft:
-        _participantLeftController.add(ParticipantEvent.fromJson(message.data));
+        final event = ParticipantEvent.fromJson(message.data);
+        final userId = event.userId;
+        if (userId.isNotEmpty) {
+          _participants.remove(userId);
+        }
+        _participantLeftController.add(event);
         return;
       case msgLayerUpdate:
         _layerUpdateController.add(LayerUpdateEvent.fromJson(message.data));
         return;
       case msgPolicyUpdate:
-        _policyUpdateController
-            .add(PolicyUpdateEvent.fromJson(message.data));
+        _policyUpdateController.add(PolicyUpdateEvent.fromJson(message.data));
         return;
       case msgParticipantMediaChanged:
       case msgIncomingCall:
@@ -264,6 +313,8 @@ class GroupCallService {
   /// Releases stream and subscription resources.
   Future<void> dispose() async {
     _activeRoomId = null;
+    _hostId = null;
+    _participants.clear();
     await _messageSubscription?.cancel();
     _messageSubscription = null;
     await _connectionSubscription?.cancel();
@@ -277,5 +328,14 @@ class GroupCallService {
     await _layerUpdateController.close();
     await _policyUpdateController.close();
     await _reconnectionStateController.close();
+  }
+
+  String? _extractHostId(Map<String, dynamic> payload) {
+    final host = payload['host_id'] ?? payload['hostId'];
+    if (host == null) {
+      return null;
+    }
+    final hostId = host.toString();
+    return hostId.isEmpty ? null : hostId;
   }
 }

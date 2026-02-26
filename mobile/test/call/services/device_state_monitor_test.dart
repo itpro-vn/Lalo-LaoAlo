@@ -2,6 +2,8 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:lalo/call/services/device_state_monitor.dart';
 
 void main() {
+  TestWidgetsFlutterBinding.ensureInitialized();
+
   group('BatteryState', () {
     test('normal battery is not low', () {
       const state = BatteryState(level: 0.80, isCharging: false);

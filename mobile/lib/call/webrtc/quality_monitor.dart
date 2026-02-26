@@ -22,6 +22,7 @@ class QualityStats {
     required this.frameWidth,
     required this.frameHeight,
     required this.framesPerSecond,
+    required this.mosScore,
     required this.tier,
   });
 
@@ -37,6 +38,9 @@ class QualityStats {
   final int? frameWidth;
   final int? frameHeight;
   final double? framesPerSecond;
+
+  /// Estimated Mean Opinion Score (1.0 to 4.5).
+  final double mosScore;
   final QualityTier tier;
 }
 
@@ -71,6 +75,8 @@ class QualityMonitor {
   Stream<QualityTier> get onTierChanged => _tierChangedController.stream;
 
   QualityTier get currentTier => _currentTier;
+
+  double get currentMos => _latestStats?.mosScore ?? 4.5;
 
   QualityStats? get latestStats => _latestStats;
 
@@ -142,9 +148,8 @@ class QualityMonitor {
 
       final jitterCandidate = _extractDouble(values, const ['jitter']);
       if (jitterCandidate != null) {
-        final ms = jitterCandidate <= 10
-            ? jitterCandidate * 1000
-            : jitterCandidate;
+        final ms =
+            jitterCandidate <= 10 ? jitterCandidate * 1000 : jitterCandidate;
         jitterMs = _pickMax(jitterMs, ms);
       }
 
@@ -178,12 +183,16 @@ class QualityMonitor {
 
       final width = _extractInt(values, const ['frameWidth']);
       if (width != null && width > 0) {
-        frameWidth = frameWidth == null ? width : (width > frameWidth ? width : frameWidth);
+        frameWidth = frameWidth == null
+            ? width
+            : (width > frameWidth ? width : frameWidth);
       }
 
       final height = _extractInt(values, const ['frameHeight']);
       if (height != null && height > 0) {
-        frameHeight = frameHeight == null ? height : (height > frameHeight ? height : frameHeight);
+        frameHeight = frameHeight == null
+            ? height
+            : (height > frameHeight ? height : frameHeight);
       }
 
       final fps = _extractDouble(values, const ['framesPerSecond']);
@@ -193,12 +202,20 @@ class QualityMonitor {
     }
 
     final totalPackets = packetsLost + packetsReceived;
-    final lossPercent = totalPackets > 0 ? (packetsLost * 100 / totalPackets).toDouble() : 0.0;
+    final lossPercent =
+        totalPackets > 0 ? (packetsLost * 100 / totalPackets).toDouble() : 0.0;
+
+    final mosScore = _calculateMos(
+      rttMs: roundTripTimeMs,
+      lossPercent: lossPercent,
+      jitterMs: jitterMs,
+    );
 
     final tier = _classifyTier(
       rttMs: roundTripTimeMs,
       lossPercent: lossPercent,
       jitterMs: jitterMs,
+      mosScore: mosScore,
     );
 
     return QualityStats(
@@ -214,6 +231,7 @@ class QualityMonitor {
       frameWidth: frameWidth,
       frameHeight: frameHeight,
       framesPerSecond: framesPerSecond,
+      mosScore: mosScore,
       tier: tier,
     );
   }
@@ -275,16 +293,48 @@ class QualityMonitor {
     required double? rttMs,
     required double lossPercent,
     required double? jitterMs,
+    double? mosScore,
   }) {
     final safeRtt = rttMs ?? 0;
     final safeJitter = jitterMs ?? 0;
 
     final isGood = safeRtt <= 120 && lossPercent <= 2 && safeJitter <= 20;
-    if (isGood) return QualityTier.good;
+    if (isGood) {
+      final mosTier = _tierFromMos(mosScore);
+      if (mosTier != QualityTier.good) return mosTier;
+      return QualityTier.good;
+    }
 
     final isFair = safeRtt <= 250 && lossPercent <= 6 && safeJitter <= 50;
     if (isFair) return QualityTier.fair;
 
+    return QualityTier.poor;
+  }
+
+  /// Calculates estimated MOS using the E-model simplified formula.
+  ///
+  /// R = 93.2 - (delay/40) - (2.5 * lossPercent) - (jitter/10)
+  /// MOS = 1 + 0.035*R + R*(R-60)*(100-R)*7e-6
+  /// Clamped to [1.0, 4.5] range.
+  double _calculateMos({
+    required double? rttMs,
+    required double lossPercent,
+    required double? jitterMs,
+  }) {
+    final delay = rttMs ?? 0;
+    final jitter = jitterMs ?? 0;
+
+    double r = 93.2 - (delay / 40.0) - (2.5 * lossPercent) - (jitter / 10.0);
+    r = r.clamp(0.0, 100.0);
+
+    final double mos = 1.0 + 0.035 * r + r * (r - 60.0) * (100.0 - r) * 7e-6;
+    return mos.clamp(1.0, 4.5);
+  }
+
+  QualityTier _tierFromMos(double? mosScore) {
+    final mos = mosScore ?? 4.5;
+    if (mos >= 4.0) return QualityTier.good;
+    if (mos >= 3.0) return QualityTier.fair;
     return QualityTier.poor;
   }
 
@@ -309,7 +359,8 @@ class QualityMonitor {
       }
 
       final since = _upgradeCandidateSince;
-      if (since != null && now.difference(since) >= const Duration(seconds: 10)) {
+      if (since != null &&
+          now.difference(since) >= const Duration(seconds: 10)) {
         _setTier(nextTier);
       }
       return;

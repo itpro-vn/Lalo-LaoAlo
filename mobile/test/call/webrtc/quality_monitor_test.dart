@@ -117,6 +117,7 @@ void main() {
         frameHeight: 720,
         framesPerSecond: 30,
         tier: QualityTier.fair,
+        mosScore: 3.2,
       );
 
       // assert
@@ -133,6 +134,7 @@ void main() {
       expect(stats.frameHeight, 720);
       expect(stats.framesPerSecond, 30);
       expect(stats.tier, QualityTier.fair);
+      expect(stats.mosScore, 3.2);
     });
 
     test('tier is computed correctly from collected metrics', () async {

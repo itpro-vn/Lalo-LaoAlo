@@ -138,6 +138,19 @@ class ApiClient {
     return _extractMap(response.data, context: 'createSession');
   }
 
+  /// Authenticates user with email/phone and password.
+  Future<Map<String, dynamic>> login(String email, String password) async {
+    final response = await _dio.post<Map<String, dynamic>>(
+      '/v1/auth/login',
+      data: <String, dynamic>{
+        'email': email,
+        'password': password,
+      },
+    );
+
+    return _extractMap(response.data, context: 'login');
+  }
+
   Future<Map<String, dynamic>> joinSession(
     String callId,
     String role,

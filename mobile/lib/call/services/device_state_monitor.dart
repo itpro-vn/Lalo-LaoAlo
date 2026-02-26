@@ -1,5 +1,8 @@
 import 'dart:async';
 
+import 'package:battery_plus/battery_plus.dart' as bp;
+import 'package:flutter/services.dart';
+
 /// Battery state information.
 class BatteryState {
   const BatteryState({
@@ -19,7 +22,8 @@ class BatteryState {
   /// Whether battery is critically low (<10%).
   bool get isCritical => level < 0.10 && !isCharging;
 
-  static const BatteryState normal = BatteryState(level: 1.0, isCharging: false);
+  static const BatteryState normal =
+      BatteryState(level: 1.0, isCharging: false);
 
   @override
   String toString() =>
@@ -74,8 +78,7 @@ class DeviceState {
       thermal == ThermalLevel.critical;
 
   /// Whether device is in critical state requiring aggressive reduction.
-  bool get isCritical =>
-      battery.isCritical || thermal == ThermalLevel.critical;
+  bool get isCritical => battery.isCritical || thermal == ThermalLevel.critical;
 
   /// Number of quality tiers to reduce based on device state.
   ///
@@ -95,24 +98,29 @@ class DeviceState {
   }
 
   @override
-  String toString() =>
-      'DeviceState(battery=$battery, thermal=$thermal)';
+  String toString() => 'DeviceState(battery=$battery, thermal=$thermal)';
 }
 
-/// Monitors device battery and thermal state.
+/// Monitors device battery and thermal state using `battery_plus`.
 ///
-/// In Flutter, this would use platform channels or plugins like
-/// `battery_plus` and platform-specific thermal APIs.
-/// This implementation provides a polling-based interface with
-/// manual state injection for testing and platform bridge.
+/// Battery level and charging state come from the `battery_plus` Flutter
+/// plugin. Thermal state uses a platform channel (`lalo/device_state`)
+/// because no cross-platform Flutter plugin exists for thermal readings.
 class DeviceStateMonitor {
   DeviceStateMonitor({
     this.pollIntervalMs = 10000,
-  });
+    bp.Battery? battery,
+  }) : _battery = battery ?? bp.Battery();
 
+  /// Platform channel for thermal state only (no Flutter plugin available).
+  static const MethodChannel _thermalChannel =
+      MethodChannel('lalo/device_state');
+
+  final bp.Battery _battery;
   final int pollIntervalMs;
 
   Timer? _pollTimer;
+  StreamSubscription<bp.BatteryState>? _batteryStateSub;
 
   DeviceState _currentState = DeviceState.normal;
 
@@ -124,19 +132,42 @@ class DeviceStateMonitor {
   DeviceState get currentState => _currentState;
   Stream<DeviceState> get onStateChanged => _stateController.stream;
 
-  /// Starts polling for device state changes.
+  /// Starts monitoring battery via `battery_plus` and polling thermal state.
   void start() {
     if (_pollTimer != null) return;
+
+    // Read initial battery level (safe if platform unavailable).
+    unawaited(_readBattery());
+
+    // Listen to battery state changes (charging/discharging).
+    // Wrapped in try-catch: onBatteryStateChanged needs ServicesBinding
+    // which is unavailable in pure unit tests.
+    if (_batteryStateSub == null) {
+      try {
+        _batteryStateSub = _battery.onBatteryStateChanged.listen((_) {
+          unawaited(_readBattery());
+        });
+      } catch (_) {
+        // Platform channel unavailable (e.g. unit tests).
+      }
+    }
+
+    // Poll thermal state periodically (no reactive API available).
     _pollTimer = Timer.periodic(
       Duration(milliseconds: pollIntervalMs),
-      (_) => _poll(),
+      (_) => unawaited(_pollThermal()),
     );
+
+    // Read thermal once on start.
+    unawaited(_pollThermal());
   }
 
-  /// Stops polling.
+  /// Stops monitoring.
   void stop() {
     _pollTimer?.cancel();
     _pollTimer = null;
+    _batteryStateSub?.cancel();
+    _batteryStateSub = null;
   }
 
   Future<void> dispose() async {
@@ -146,7 +177,7 @@ class DeviceStateMonitor {
 
   /// Updates battery state from platform.
   ///
-  /// Called by platform channel handler or battery_plus listener.
+  /// Called internally from battery_plus or externally for testing.
   void updateBattery({required double level, required bool isCharging}) {
     final newBattery = BatteryState(level: level, isCharging: isCharging);
     if (newBattery != _currentState.battery) {
@@ -159,8 +190,6 @@ class DeviceStateMonitor {
   }
 
   /// Updates thermal state from platform.
-  ///
-  /// Called by platform channel handler.
   void updateThermal(ThermalLevel level) {
     if (level != _currentState.thermal) {
       _currentState = DeviceState(
@@ -181,10 +210,57 @@ class DeviceStateMonitor {
 
   // -- Internal --
 
-  void _poll() {
-    // In production, this would query platform APIs.
-    // State updates come via updateBattery() and updateThermal()
-    // from platform channel listeners.
+  /// Reads battery level and state via `battery_plus`.
+  Future<void> _readBattery() async {
+    try {
+      final level = await _battery.batteryLevel;
+      final batteryState = await _battery.batteryState;
+
+      final isCharging = batteryState == bp.BatteryState.charging ||
+          batteryState == bp.BatteryState.full;
+
+      final normalizedLevel = (level / 100.0).clamp(0.0, 1.0);
+
+      updateBattery(level: normalizedLevel, isCharging: isCharging);
+    } catch (_) {
+      // battery_plus unavailable (e.g. simulator without battery support).
+    }
+  }
+
+  /// Polls thermal state via platform channel (no Flutter plugin available).
+  Future<void> _pollThermal() async {
+    try {
+      final thermalRaw =
+          await _thermalChannel.invokeMethod<dynamic>('getThermalState');
+      if (thermalRaw != null) {
+        updateThermal(_parseThermalLevel(thermalRaw));
+      }
+    } catch (_) {
+      // Platform channel unavailable or method not implemented.
+    }
+  }
+
+  ThermalLevel _parseThermalLevel(dynamic value) {
+    if (value is int) {
+      return switch (value) {
+        <= 0 => ThermalLevel.nominal,
+        1 => ThermalLevel.fair,
+        2 => ThermalLevel.serious,
+        _ => ThermalLevel.critical,
+      };
+    }
+
+    if (value is String) {
+      return switch (value.toLowerCase()) {
+        'nominal' || 'normal' => ThermalLevel.nominal,
+        'fair' || 'moderate' => ThermalLevel.fair,
+        'serious' || 'high' => ThermalLevel.serious,
+        'critical' => ThermalLevel.critical,
+        _ => ThermalLevel.nominal,
+      };
+    }
+
+    return ThermalLevel.nominal;
   }
 
   void _emitState() {
