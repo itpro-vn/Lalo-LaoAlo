@@ -112,6 +112,33 @@ func (s *Store) InvalidateToken(ctx context.Context, pushToken string) error {
 	return nil
 }
 
+// UserProfile holds basic user display info for push notifications.
+type UserProfile struct {
+	DisplayName string
+	AvatarURL   string
+}
+
+// GetUserProfile looks up display_name and avatar_url from the users table.
+// Returns nil (no error) if the user is not found.
+func (s *Store) GetUserProfile(ctx context.Context, userID string) (*UserProfile, error) {
+	query := `SELECT display_name, avatar_url FROM users WHERE id = $1`
+	var displayName string
+	var avatarURL sql.NullString
+
+	err := s.db.QueryRowContext(ctx, query, userID).Scan(&displayName, &avatarURL)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("get user profile: %w", err)
+	}
+
+	return &UserProfile{
+		DisplayName: displayName,
+		AvatarURL:   avatarURL.String,
+	}, nil
+}
+
 // CleanupStaleTokens soft-deletes tokens not updated within the given duration.
 func (s *Store) CleanupStaleTokens(ctx context.Context, staleDuration time.Duration) (int64, error) {
 	query := `UPDATE push_tokens SET is_active = false, updated_at = now() WHERE is_active = true AND updated_at < $1`

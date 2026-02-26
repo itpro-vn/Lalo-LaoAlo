@@ -13,11 +13,11 @@ import (
 // Gateway is the push notification gateway that routes incoming call
 // notifications to the appropriate platform sender (APNs/FCM).
 type Gateway struct {
-	store     *Store
-	apns      Sender
-	fcm       Sender
-	bus       *events.Bus
-	ringTTL   int // seconds, from call config ring_timeout_seconds
+	store   *Store
+	apns    Sender
+	fcm     Sender
+	bus     *events.Bus
+	ringTTL int // seconds, from call config ring_timeout_seconds
 
 	// For tracking delivery results
 	onAllFailed func(callID, callerID string) // callback when all devices fail
@@ -212,8 +212,14 @@ func (g *Gateway) SubscribeToCallEvents(ctx context.Context) error {
 			TTL:       g.ringTTL,
 		}
 
-		// TODO: lookup caller name/avatar from user service
+		// Lookup caller display name and avatar from users table.
 		push.CallerName = callEvent.CallerID // fallback to ID
+		if profile, err := g.store.GetUserProfile(ctx, callEvent.CallerID); err != nil {
+			log.Printf("push: failed to lookup caller profile %s: %v", callEvent.CallerID, err)
+		} else if profile != nil {
+			push.CallerName = profile.DisplayName
+			push.CallerAvatarURL = profile.AvatarURL
+		}
 
 		result, err := g.SendIncomingCallPush(ctx, push, callEvent.CalleeID)
 		if err != nil {

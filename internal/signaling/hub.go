@@ -66,21 +66,21 @@ type Hub struct {
 func NewHub(sessions *SessionStore, bus *events.Bus, cfg *config.Config, orch *session.Orchestrator) *Hub {
 	ctx, cancel := context.WithCancel(context.Background())
 	return &Hub{
-		clients:     make(map[string]map[string]*Client),
-		seqCounters: make(map[string]*atomic.Int64),
-		rooms:       make(map[string]map[string]bool),
+		clients:         make(map[string]map[string]*Client),
+		seqCounters:     make(map[string]*atomic.Int64),
+		rooms:           make(map[string]map[string]bool),
 		graceTimers:     make(map[string]context.CancelFunc),
 		roomGraceTimers: make(map[string]context.CancelFunc),
 		iceBuf:          make(map[string][]ICECandidateMsg),
-		register:    make(chan *Client),
-		unregister:  make(chan *Client),
-		incoming:    make(chan *ClientMessage, 256),
-		sessions:    sessions,
-		bus:         bus,
-		cfg:         cfg,
-		orchestrator: orch,
-		ctx:         ctx,
-		cancel:      cancel,
+		register:        make(chan *Client),
+		unregister:      make(chan *Client),
+		incoming:        make(chan *ClientMessage, 256),
+		sessions:        sessions,
+		bus:             bus,
+		cfg:             cfg,
+		orchestrator:    orch,
+		ctx:             ctx,
+		cancel:          cancel,
 	}
 }
 
@@ -374,9 +374,9 @@ func (h *Hub) handleCallInitiate(caller *Client, data json.RawMessage) {
 		CallType: msg.CallType,
 	})
 	if !reached {
-		// Callee is offline — will be handled by push notification
-		log.Printf("callee offline, call_id=%s callee=%s", callID, msg.CalleeID)
-		// TODO: Send push notification
+		// Callee is offline — push notification is handled by the Push Gateway
+		// which subscribes to call.initiated events via NATS (published above).
+		log.Printf("callee offline, call_id=%s callee=%s (push via gateway)", callID, msg.CalleeID)
 	}
 
 	// Start ring timeout
