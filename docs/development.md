@@ -14,7 +14,7 @@
 ### 1. Clone repository
 
 ```bash
-git clone https://github.com/minhgv/lalo.git
+git clone https://github.com/itpro-vn/Lalo-LaoAlo.git
 cd lalo
 ```
 
