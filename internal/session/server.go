@@ -15,6 +15,7 @@ import (
 type Server struct {
 	httpServer *http.Server
 	handler    *Handler
+	auth       *auth.HTTPHandler
 	jwtService *auth.JWTService
 	port       int
 }
@@ -23,6 +24,7 @@ type Server struct {
 func NewServer(handler *Handler, jwtService *auth.JWTService, port int) *Server {
 	return &Server{
 		handler:    handler,
+		auth:       auth.NewHTTPHandler(jwtService),
 		jwtService: jwtService,
 		port:       port,
 	}
@@ -50,6 +52,18 @@ func (s *Server) Start() error {
 	// Session API — JWT protected
 	mux.Handle("/api/v1/sessions", auth.JWTMiddleware(s.jwtService)(s.handler))
 	mux.Handle("/api/v1/sessions/", auth.JWTMiddleware(s.jwtService)(s.handler))
+
+	// Room (group call) API — JWT protected
+	mux.Handle("/api/v1/rooms", auth.JWTMiddleware(s.jwtService)(s.handler))
+	mux.Handle("/api/v1/rooms/", auth.JWTMiddleware(s.jwtService)(s.handler))
+
+	// Auth API
+	mux.Handle("/api/v1/auth/login", s.auth)
+	mux.Handle("/api/v1/auth/refresh", s.auth)
+	mux.Handle("/api/v1/auth/me", auth.JWTMiddleware(s.jwtService)(s.auth))
+	mux.Handle("/v1/auth/login", s.auth)
+	mux.Handle("/v1/auth/refresh", s.auth)
+	mux.Handle("/v1/auth/me", auth.JWTMiddleware(s.jwtService)(s.auth))
 
 	s.httpServer = &http.Server{
 		Addr:    fmt.Sprintf(":%d", s.port),
