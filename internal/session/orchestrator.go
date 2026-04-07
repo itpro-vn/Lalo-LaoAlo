@@ -17,12 +17,13 @@ import (
 // Orchestrator manages call session lifecycle, topology decisions,
 // participant management, and CDR generation.
 type Orchestrator struct {
-	store   *Store
-	bus     *events.Bus
-	cdr     *CDRWriter
-	turnSvc *auth.TurnService
-	lkSvc   *auth.LiveKitTokenService
-	cfg     *config.Config
+	store    *Store
+	bus      *events.Bus
+	cdr      *CDRWriter
+	turnSvc  *auth.TurnService
+	lkSvc    *auth.LiveKitTokenService
+	cfg      *config.Config
+	resolver *IdentityResolver
 }
 
 // NewOrchestrator creates a new session orchestrator.
@@ -35,12 +36,13 @@ func NewOrchestrator(
 	cfg *config.Config,
 ) *Orchestrator {
 	return &Orchestrator{
-		store:   NewStore(rdb),
-		bus:     bus,
-		cdr:     NewCDRWriter(db, bus),
-		turnSvc: turnSvc,
-		lkSvc:   lkSvc,
-		cfg:     cfg,
+		store:    NewStore(rdb),
+		bus:      bus,
+		cdr:      NewCDRWriter(db, bus),
+		turnSvc:  turnSvc,
+		lkSvc:    lkSvc,
+		cfg:      cfg,
+		resolver: NewIdentityResolver(db),
 	}
 }
 
@@ -65,6 +67,15 @@ type CreateSessionResponse struct {
 // CreateSession validates participants, decides topology, provisions
 // credentials, and creates a new call session.
 func (o *Orchestrator) CreateSession(ctx context.Context, req CreateSessionRequest) (*CreateSessionResponse, error) {
+	// Resolve callee identity (phone/ext/UUID → UUID)
+	if o.resolver != nil {
+		resolved, err := o.resolver.Resolve(ctx, req.CalleeID)
+		if err != nil {
+			return nil, fmt.Errorf("resolve callee: %w", err)
+		}
+		req.CalleeID = resolved
+	}
+
 	callID := uuid.NewString()
 	now := time.Now()
 

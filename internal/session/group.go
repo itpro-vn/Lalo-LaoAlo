@@ -39,6 +39,15 @@ type InviteToRoomResponse struct {
 // the host, and all participants receive invitations. Group calls always
 // use SFU topology via LiveKit.
 func (o *Orchestrator) CreateGroupSession(ctx context.Context, req CreateGroupRequest) (*CreateGroupResponse, error) {
+	// Resolve participant identities (phone/ext/UUID → UUID)
+	if o.resolver != nil {
+		resolved, err := o.resolver.ResolveAll(ctx, req.Participants)
+		if err != nil {
+			return nil, fmt.Errorf("resolve participants: %w", err)
+		}
+		req.Participants = resolved
+	}
+
 	maxP := o.cfg.Group.MaxParticipants
 	if maxP == 0 {
 		maxP = 8
@@ -222,6 +231,15 @@ func (o *Orchestrator) LeaveGroupSession(ctx context.Context, roomID, userID str
 // InviteToRoom invites additional participants to an existing group call.
 // Only the host (initiator) can invite.
 func (o *Orchestrator) InviteToRoom(ctx context.Context, roomID, inviterID string, inviteeIDs []string) (*InviteToRoomResponse, error) {
+	// Resolve invitee identities (phone/ext/UUID → UUID)
+	if o.resolver != nil {
+		resolved, err := o.resolver.ResolveAll(ctx, inviteeIDs)
+		if err != nil {
+			return nil, fmt.Errorf("resolve invitees: %w", err)
+		}
+		inviteeIDs = resolved
+	}
+
 	sess, err := o.store.Get(ctx, roomID)
 	if err != nil {
 		return nil, fmt.Errorf("room not found: %w", err)
